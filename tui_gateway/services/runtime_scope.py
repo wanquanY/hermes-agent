@@ -115,6 +115,7 @@ _RUNTIME_STATE_READ_METHODS = frozenset({
 })
 
 _RUNTIME_MUTATION_METHODS = frozenset({
+    "subagent.interrupt",
     "team_mission.cancel",
     "team_mission.node.update",
     "team_mission.plan.approve",

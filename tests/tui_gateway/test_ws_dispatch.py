@@ -193,6 +193,21 @@ def test_profile_capability_reload_is_owned_by_runtime_worker():
     )
 
 
+def test_profile_scoped_subagent_interrupt_is_owned_by_runtime_worker():
+    assert runtime_scope.should_route_to_worker(
+        {
+            "id": "subagent-interrupt-1",
+            "method": "subagent.interrupt",
+            "params": {
+                "subagent_id": "subagent-2",
+                "conversation_session_id": "stored-session-1",
+                "runtime_scope_key": "profile:agent-a:version:v1",
+                "agent_profile_id": "agent-a",
+            },
+        }
+    )
+
+
 def test_run_prepare_is_owned_by_same_runtime_worker_as_submit():
     """The single-use route registry must live in the submitting worker."""
     assert runtime_scope.should_route_to_worker(

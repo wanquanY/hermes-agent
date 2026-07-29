@@ -21,6 +21,7 @@ from hermes_agent.orchestration import worker_runtime
 from tui_gateway.services.runtime_scope import RuntimeScope
 from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 from hermes_agent.orchestration.worker_supervisor import RunWorker, WorkerSupervisor
+from tui_gateway.run_worker import SubagentInterruptFrame
 
 
 @pytest.fixture(autouse=True)
@@ -229,7 +230,6 @@ async def test_primary_dispatch_routes_terminal_response_to_owner(
         },
         transport,
     )
-
     assert handled is True
     assert responded == [(request_id, answer, expected_kind)]
     assert transport.written == [
@@ -239,6 +239,85 @@ async def test_primary_dispatch_routes_terminal_response_to_owner(
             "result": {"status": "ok", "source": "primary-run-worker"},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_primary_dispatch_routes_targeted_subagent_interrupt_to_scoped_worker(
+    monkeypatch,
+) -> None:
+    transport = _RecordingTransport()
+    sent: list[tuple[str, str, object]] = []
+
+    class _Supervisor:
+        async def send(self, scope_key, conversation_id, frame):
+            sent.append((scope_key, conversation_id, frame))
+            return True
+
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _Supervisor())
+
+    handled = await worker_runtime.primary_dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": "interrupt-subagent-1",
+            "method": "subagent.interrupt",
+            "params": {
+                "subagent_id": "subagent-2",
+                "conversation_session_id": "conversation-1",
+                "runtime_scope_key": "profile:agent-a",
+                "agent_profile_id": "agent-a",
+            },
+        },
+        transport,
+    )
+
+    assert handled is True
+    assert sent == [
+        (
+            "profile:agent-a",
+            "conversation-1",
+            SubagentInterruptFrame(subagent_id="subagent-2"),
+        )
+    ]
+    assert transport.written == [{
+        "jsonrpc": "2.0",
+        "id": "interrupt-subagent-1",
+        "result": {
+            "found": True,
+            "subagent_id": "subagent-2",
+            "conversation_session_id": "conversation-1",
+            "source": "primary-run-worker",
+        },
+    }]
+
+
+@pytest.mark.asyncio
+async def test_primary_dispatch_does_not_route_subagent_interrupt_without_conversation(
+    monkeypatch,
+) -> None:
+    transport = _RecordingTransport()
+
+    class _Supervisor:
+        async def send(self, *_args):
+            raise AssertionError("must not route to a warm worker without a conversation")
+
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _Supervisor())
+
+    handled = await worker_runtime.primary_dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": "interrupt-subagent-without-conversation",
+            "method": "subagent.interrupt",
+            "params": {
+                "subagent_id": "subagent-2",
+                "runtime_scope_key": "profile:agent-a",
+                "agent_profile_id": "agent-a",
+            },
+        },
+        transport,
+    )
+
+    assert handled is False
+    assert transport.written == []
 
 
 @pytest.mark.asyncio

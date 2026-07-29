@@ -32,6 +32,7 @@ from tui_gateway.run_worker import (
     RunStartFrame,
     RunTerminalFrame,
     ShutdownFrame,
+    SubagentInterruptFrame,
     WorkerProtocol,
     WorkerReadyFrame,
     WorkerRunBackend,
@@ -118,6 +119,13 @@ def test_decode_run_cancel() -> None:
     assert frame == RunCancelFrame(run_id="run-7")
 
 
+def test_decode_subagent_interrupt() -> None:
+    frame = decode_incoming(
+        json.dumps({"op": "subagent.interrupt", "subagent_id": "subagent-2"})
+    )
+    assert frame == SubagentInterruptFrame(subagent_id="subagent-2")
+
+
 def test_decode_interactive_response_each_kind() -> None:
     for kind in (
         "clarify",
@@ -172,6 +180,7 @@ def test_decode_shutdown() -> None:
         ('{"foo":1}', "missing string field 'op'"),
         ('{"op":"unknown"}', "unknown op"),
         ('{"op":"run.cancel"}', "must be a string"),
+        ('{"op":"subagent.interrupt"}', "must be a string"),
         ('{"op":"run.start", "run_id":"a"}', "must be a string"),  # missing turn_id
     ],
 )
@@ -269,6 +278,7 @@ def test_encode_non_ascii_payload_compact() -> None:
             prompt="hi", params={"model": "claude-opus"},
         ),
         RunCancelFrame(run_id="r2"),
+        SubagentInterruptFrame(subagent_id="subagent-2"),
         InteractiveResponseFrame(
             kind="clarify",
             request_id="req-1",
@@ -597,6 +607,33 @@ async def test_handler_dispatches_run_cancel() -> None:
     )
     await proto.run()
     assert backend.cancels == ["r9"]
+
+
+@pytest.mark.asyncio
+async def test_handler_interrupts_only_requested_subagent(monkeypatch) -> None:
+    interrupted: list[str] = []
+    monkeypatch.setattr(
+        "tools.delegate_tool.interrupt_subagent",
+        lambda subagent_id: interrupted.append(subagent_id) or True,
+    )
+    handler = _build_default_handler(_RecordingBackend(), _RecordingResponder(), set())
+    proto = WorkerProtocol(
+        lines_in=_lines_from(
+            [
+                json.dumps({
+                    "op": "subagent.interrupt",
+                    "subagent_id": "subagent-2",
+                }),
+                json.dumps({"op": "shutdown"}),
+            ]
+        ),
+        emit=_Sink().write,
+        handler=handler,
+    )
+
+    await proto.run()
+
+    assert interrupted == ["subagent-2"]
 
 
 @pytest.mark.asyncio

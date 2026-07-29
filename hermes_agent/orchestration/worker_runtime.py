@@ -41,6 +41,7 @@ from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
 from tui_gateway.run_worker import (
     RunCancelFrame,
     RunStartFrame,
+    SubagentInterruptFrame,
     WORKER_INTERACTIVE_KINDS,
     dovie_product_context_from_params,
 )
@@ -380,6 +381,8 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
         return await _dispatch_profile_capability_reload(req, transport, params)
     if method == "run.cancel":
         return await _dispatch_run_cancel(req, transport, params)
+    if method == "subagent.interrupt":
+        return await _dispatch_subagent_interrupt(req, transport, params)
     if method in _INTERACTIVE_RESPONSE_METHODS:
         return await _dispatch_interactive_response(req, transport, method, params)
     if method not in ("run.submit", "prompt.submit"):
@@ -721,6 +724,47 @@ async def _dispatch_run_cancel(req: dict, transport: Any, params: dict) -> bool:
         "turn_id": info.turn_id,
         "source": "primary-run-worker",
     })
+    return True
+
+
+async def _dispatch_subagent_interrupt(
+    req: dict,
+    transport: Any,
+    params: dict,
+) -> bool:
+    """Route a targeted child interruption to its owning isolated worker.
+
+    The active subagent registry is process-local. Handling this method in the
+    control-plane process always misses children created by a scoped worker, so
+    the request must cross the worker protocol before calling
+    ``tools.delegate_tool.interrupt_subagent``.
+    """
+    subagent_id = str(
+        params.get("subagent_id") or params.get("subagentId") or ""
+    ).strip()
+    if not subagent_id:
+        return False
+    scope = runtime_scope_from_request(req)
+    if not scope.runtime_scope_key or not scope.conversation_id:
+        return False
+    supervisor = worker_supervisor()
+    ok = await supervisor.send(
+        scope.runtime_scope_key,
+        scope.conversation_id,
+        SubagentInterruptFrame(subagent_id=subagent_id),
+    )
+    if not ok:
+        return False
+    await _ack_success(
+        transport,
+        req.get("id"),
+        {
+            "found": True,
+            "subagent_id": subagent_id,
+            "conversation_session_id": scope.conversation_id,
+            "source": "primary-run-worker",
+        },
+    )
     return True
 
 

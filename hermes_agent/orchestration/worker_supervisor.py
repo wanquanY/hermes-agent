@@ -30,6 +30,7 @@ from tui_gateway.run_worker import (
     RuntimeEnvUpdateFrame,
     RunCancelFrame,
     RunStartFrame,
+    SubagentInterruptFrame,
     RunTerminalFrame,
     ShutdownFrame,
     WorkerReadyFrame,
@@ -448,7 +449,7 @@ class WorkerSupervisor:
                 reason="worker_not_running",
             )
             return False
-        if isinstance(frame, (RunStartFrame, RunCancelFrame)):
+        if isinstance(frame, (RunStartFrame, RunCancelFrame, SubagentInterruptFrame)):
             _worker_supervisor_log(
                 "supervisor-send",
                 scope_key=scope_key,
@@ -456,6 +457,7 @@ class WorkerSupervisor:
                 frame_type=type(frame).__name__,
                 run_id=str(getattr(frame, "run_id", "") or ""),
                 turn_id=str(getattr(frame, "turn_id", "") or ""),
+                subagent_id=str(getattr(frame, "subagent_id", "") or ""),
                 worker_pid=worker.process.pid if worker.process else None,
             )
         if not await self._send_frame_to_worker(worker, frame):

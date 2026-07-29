@@ -11,6 +11,7 @@ Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
       {"op":"run.start", "run_id", "turn_id", "conversation_session_id",
        "prompt", "params", "dovie_product_context"}
       {"op":"run.cancel", "run_id"}
+      {"op":"subagent.interrupt", "subagent_id"}
       {"op":"interactive.response", "kind", "request_id", "answer"}
       {"op":"runtime.env.update", "env_updates": {"KEY": "value"}}
       {"op":"shutdown"}
@@ -64,6 +65,11 @@ class RunStartFrame:
 @dataclass(frozen=True)
 class RunCancelFrame:
     run_id: str
+
+
+@dataclass(frozen=True)
+class SubagentInterruptFrame:
+    subagent_id: str
 
 
 # Canonical worker-wire interactive kinds. Keep this in the protocol module so
@@ -122,6 +128,7 @@ class DBRpcReplyFrame:
 IncomingFrame = Union[
     RunStartFrame,
     RunCancelFrame,
+    SubagentInterruptFrame,
     InteractiveResponseFrame,
     ActivityEventFrame,
     RuntimeEnvUpdateFrame,
@@ -339,6 +346,10 @@ def decode_incoming(line: str) -> IncomingFrame:
         )
     if op == "run.cancel":
         return RunCancelFrame(run_id=_require_str(obj, "run_id", op=op))
+    if op == "subagent.interrupt":
+        return SubagentInterruptFrame(
+            subagent_id=_require_str(obj, "subagent_id", op=op)
+        )
     if op == "interactive.response":
         kind = _require_str(obj, "kind", op=op)
         if kind not in WORKER_INTERACTIVE_KINDS:
@@ -386,6 +397,8 @@ def encode_incoming(frame: IncomingFrame) -> str:
             body["dovie_product_context"] = frame.dovie_product_context
     elif isinstance(frame, RunCancelFrame):
         body = {"op": "run.cancel", "run_id": frame.run_id}
+    elif isinstance(frame, SubagentInterruptFrame):
+        body = {"op": "subagent.interrupt", "subagent_id": frame.subagent_id}
     elif isinstance(frame, InteractiveResponseFrame):
         body = {
             "op": "interactive.response",
@@ -945,6 +958,15 @@ def _build_default_handler(
                 work_lease.release()
         elif isinstance(frame, RunCancelFrame):
             await backend.cancel(frame.run_id)
+        elif isinstance(frame, SubagentInterruptFrame):
+            from tools.delegate_tool import interrupt_subagent
+
+            if not interrupt_subagent(frame.subagent_id):
+                await proto.emit_log(
+                    "warn",
+                    "subagent.interrupt: no active subagent "
+                    f"for subagent_id={frame.subagent_id}",
+                )
         elif isinstance(frame, InteractiveResponseFrame):
             resolved = await responder.resolve(frame)
             if resolved and frame.kind not in TRANSIENT_WORKER_INTERACTIVE_KINDS:
