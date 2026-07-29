@@ -19,17 +19,19 @@ TRANSIENT_PLATFORM_EVENT_TYPES = frozenset(
 )
 
 # Conversation-owner facts remain durable even when they are not attached to
-# an active run.  In particular, recalling a completed turn has no live
-# ``run_id`` by design, but it still rewrites the authoritative transcript and
-# must occupy the same monotonic conversation cursor as run events.  Keep this
-# policy beside the transient-event taxonomy so transport code never infers
-# durability from incidental identity fields.
+# an active run. Recalling a completed turn rewrites the transcript, while
+# changing a session model rewrites the execution route used by the next turn.
+# Both mutations commonly happen between runs and must still occupy the same
+# monotonic conversation cursor as run events. Keep this policy beside the
+# transient-event taxonomy so transport code never infers durability from
+# incidental identity fields.
 DURABLE_CONVERSATION_EVENT_TYPES = frozenset(
     {
         "activity.upserted",
         "participant.upserted",
         "session.branched",
         "session.info",
+        "session.model.changed",
         "session.recalled",
     }
 )
