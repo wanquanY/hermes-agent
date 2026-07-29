@@ -160,12 +160,15 @@ _LEGACY_ACTIVITY_KINDS = frozenset({
     "member_chat",
     "mission",
 })
-_TERMINAL_ACTIVITY_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_TERMINAL_ACTIVITY_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "interrupted"}
+)
 _LEGACY_ACTIVITY_STATUS_ALLOWED_PREVIOUS = {
     "running": ("pending",),
     "completed": ("pending", "running"),
     "failed": ("pending", "running"),
     "cancelled": ("pending", "running"),
+    "interrupted": ("pending", "running"),
 }
 
 
@@ -805,7 +808,7 @@ class TeamMissionRepoImpl:
                 target_profile_id TEXT,
                 target_team_id TEXT,
                 target_mission_id TEXT,
-                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled', 'interrupted')),
                 prompt_summary TEXT,
                 result_summary TEXT,
                 result_json TEXT,
@@ -856,7 +859,7 @@ class TeamMissionRepoImpl:
             raise ValueError("kind required")
         if stable_kind not in _LEGACY_ACTIVITY_KINDS:
             raise sqlite3.IntegrityError("invalid activity kind")
-        if stable_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+        if stable_status not in {"pending", "running", "completed", "failed", "cancelled", "interrupted"}:
             raise sqlite3.IntegrityError("invalid activity status")
         now = time.time()
         started_at = now if stable_status == "running" else None
@@ -905,7 +908,7 @@ class TeamMissionRepoImpl:
         if not stable_conversation or not stable_mission:
             return {}
         stable_status = _text(status) or "running"
-        if stable_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+        if stable_status not in {"pending", "running", "completed", "failed", "cancelled", "interrupted"}:
             stable_status = "running"
         timestamp = float(now if now is not None else time.time())
         activity_id = _mission_activity_id(stable_mission)
@@ -948,14 +951,14 @@ class TeamMissionRepoImpl:
                 kind = 'mission',
                 target_mission_id = excluded.target_mission_id,
                 status = CASE
-                    WHEN activities.status IN ('completed', 'failed', 'cancelled')
+                    WHEN activities.status IN ('completed', 'failed', 'cancelled', 'interrupted')
                     THEN activities.status
                     ELSE excluded.status
                 END,
                 prompt_summary = COALESCE(NULLIF(excluded.prompt_summary, ''), activities.prompt_summary),
                 started_at = COALESCE(activities.started_at, excluded.started_at),
                 completed_at = CASE
-                    WHEN activities.status IN ('completed', 'failed', 'cancelled')
+                    WHEN activities.status IN ('completed', 'failed', 'cancelled', 'interrupted')
                     THEN activities.completed_at
                     ELSE excluded.completed_at
                 END,
@@ -995,7 +998,7 @@ class TeamMissionRepoImpl:
             raise ValueError("conversation_id required")
         if not stable_mission:
             raise ValueError("mission_id required")
-        if stable_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+        if stable_status not in {"pending", "running", "completed", "failed", "cancelled", "interrupted"}:
             stable_status = "running"
         now = time.time()
         started_at = now if stable_status == "running" else None
@@ -1039,7 +1042,7 @@ class TeamMissionRepoImpl:
                        target_team_id = COALESCE(?, target_team_id),
                        target_mission_id = ?,
                        status = CASE
-                           WHEN status IN ('completed', 'failed', 'cancelled') THEN status
+                           WHEN status IN ('completed', 'failed', 'cancelled', 'interrupted') THEN status
                            WHEN ? = 'running' THEN 'running'
                            ELSE status
                        END,
@@ -1091,7 +1094,7 @@ class TeamMissionRepoImpl:
             FROM activities
             WHERE conversation_id = ?
               AND kind = 'mission'
-              AND status NOT IN ('completed', 'failed', 'cancelled')
+              AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
             ORDER BY started_at ASC, created_at ASC, activity_id ASC
             """,
             (stable_conversation,),
@@ -1122,7 +1125,7 @@ class TeamMissionRepoImpl:
                    updated_at = ?
              WHERE kind = 'mission'
                AND target_mission_id = ?
-               AND status NOT IN ('completed', 'failed', 'cancelled')
+               AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
             """,
             (
                 stable_status,
@@ -1154,7 +1157,7 @@ class TeamMissionRepoImpl:
             raise ValueError("activity_id required")
         if not stable_status:
             raise ValueError("status required")
-        if stable_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+        if stable_status not in {"pending", "running", "completed", "failed", "cancelled", "interrupted"}:
             raise sqlite3.IntegrityError("invalid activity status")
         now = time.time()
         assignments = ["status = ?", "updated_at = ?"]

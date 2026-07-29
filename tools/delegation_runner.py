@@ -516,7 +516,14 @@ def run_single_child(
         api_calls = result.get("api_calls", 0)
 
         if interrupted:
-            status = "interrupted"
+            requested_terminal_status = str(
+                getattr(child, "_subagent_terminal_status", "") or ""
+            ).strip()
+            status = (
+                "cancelled"
+                if requested_terminal_status in {"cancelled", "canceled"}
+                else "interrupted"
+            )
         elif summary:
             # A summary means the subagent produced usable output.
             # exit_reason ("completed" vs "max_iterations") already
@@ -563,7 +570,7 @@ def run_single_child(
 
         # Determine exit reason
         if interrupted:
-            exit_reason = "interrupted"
+            exit_reason = status
         elif completed:
             exit_reason = "completed"
         else:

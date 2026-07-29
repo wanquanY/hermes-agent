@@ -239,7 +239,7 @@ CREATE TABLE IF NOT EXISTS activities (
     target_profile_id TEXT,
     target_team_id TEXT,
     target_mission_id TEXT,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled', 'interrupted')),
     prompt_summary TEXT,
     result_summary TEXT,
     result_json TEXT,

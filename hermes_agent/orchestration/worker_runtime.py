@@ -744,6 +744,9 @@ async def _dispatch_subagent_interrupt(
     ).strip()
     if not subagent_id:
         return False
+    reason = str(
+        params.get("reason") or "subagent_cancelled_by_user"
+    ).strip() or "subagent_cancelled_by_user"
     scope = runtime_scope_from_request(req)
     if not scope.runtime_scope_key or not scope.conversation_id:
         return False
@@ -751,7 +754,7 @@ async def _dispatch_subagent_interrupt(
     ok = await supervisor.send(
         scope.runtime_scope_key,
         scope.conversation_id,
-        SubagentInterruptFrame(subagent_id=subagent_id),
+        SubagentInterruptFrame(subagent_id=subagent_id, reason=reason),
     )
     if not ok:
         return False

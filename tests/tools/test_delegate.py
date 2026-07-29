@@ -721,6 +721,72 @@ class TestDelegateObservability(unittest.TestCase):
         self.assertEqual(complete_kwargs["summary"], long_summary)
         self.assertLess(len(complete_preview), len(long_summary))
 
+    def test_targeted_user_interrupt_completes_as_cancelled(self):
+        from tools.delegate_tool import _run_single_child
+
+        parent = _make_mock_parent(depth=0)
+        child = MagicMock()
+        child.model = "test-model"
+        child.session_prompt_tokens = 0
+        child.session_completion_tokens = 0
+        child.session_reasoning_tokens = 0
+        child.session_estimated_cost_usd = 0
+        child._credential_pool = None
+        child._delegate_saved_tool_names = []
+        child._delegate_role = "leaf"
+        child._subagent_terminal_status = "cancelled"
+        child.run_conversation.return_value = {
+            "final_response": "",
+            "completed": False,
+            "interrupted": True,
+            "api_calls": 1,
+            "messages": [],
+        }
+
+        result = _run_single_child(0, "取消这个任务", child, parent)
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["exit_reason"], "cancelled")
+
+    def test_targeted_cancel_marks_the_whole_selected_branch(self):
+        from tools import delegate_tool
+
+        target = MagicMock()
+        descendant = MagicMock()
+        sibling = MagicMock()
+        delegate_tool._register_subagent(
+            {"subagent_id": "target", "parent_id": None, "agent": target}
+        )
+        delegate_tool._register_subagent(
+            {
+                "subagent_id": "descendant",
+                "parent_id": "target",
+                "agent": descendant,
+            }
+        )
+        delegate_tool._register_subagent(
+            {"subagent_id": "sibling", "parent_id": None, "agent": sibling}
+        )
+        try:
+            self.assertTrue(
+                delegate_tool.interrupt_subagent(
+                    "target",
+                    reason="subagent_cancelled_by_user",
+                )
+            )
+            self.assertEqual(target._subagent_terminal_status, "cancelled")
+            self.assertEqual(descendant._subagent_terminal_status, "cancelled")
+            self.assertNotIn("_subagent_terminal_status", sibling.__dict__)
+            target.interrupt.assert_called_once_with(
+                "subagent_cancelled_by_user"
+            )
+            descendant.interrupt.assert_not_called()
+            sibling.interrupt.assert_not_called()
+        finally:
+            delegate_tool._unregister_subagent("target")
+            delegate_tool._unregister_subagent("descendant")
+            delegate_tool._unregister_subagent("sibling")
+
     def test_observability_fields_present(self):
         """Completed child should return tool_trace, tokens, model, exit_reason."""
         parent = _make_mock_parent(depth=0)

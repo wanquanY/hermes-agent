@@ -121,9 +121,16 @@ def test_decode_run_cancel() -> None:
 
 def test_decode_subagent_interrupt() -> None:
     frame = decode_incoming(
-        json.dumps({"op": "subagent.interrupt", "subagent_id": "subagent-2"})
+        json.dumps({
+            "op": "subagent.interrupt",
+            "subagent_id": "subagent-2",
+            "reason": "subagent_cancelled_by_user",
+        })
     )
-    assert frame == SubagentInterruptFrame(subagent_id="subagent-2")
+    assert frame == SubagentInterruptFrame(
+        subagent_id="subagent-2",
+        reason="subagent_cancelled_by_user",
+    )
 
 
 def test_decode_interactive_response_each_kind() -> None:
@@ -278,7 +285,10 @@ def test_encode_non_ascii_payload_compact() -> None:
             prompt="hi", params={"model": "claude-opus"},
         ),
         RunCancelFrame(run_id="r2"),
-        SubagentInterruptFrame(subagent_id="subagent-2"),
+        SubagentInterruptFrame(
+            subagent_id="subagent-2",
+            reason="subagent_cancelled_by_user",
+        ),
         InteractiveResponseFrame(
             kind="clarify",
             request_id="req-1",
@@ -611,10 +621,12 @@ async def test_handler_dispatches_run_cancel() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_interrupts_only_requested_subagent(monkeypatch) -> None:
-    interrupted: list[str] = []
+    interrupted: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "tools.delegate_tool.interrupt_subagent",
-        lambda subagent_id: interrupted.append(subagent_id) or True,
+        lambda subagent_id, *, reason: interrupted.append(
+            (subagent_id, reason)
+        ) or True,
     )
     handler = _build_default_handler(_RecordingBackend(), _RecordingResponder(), set())
     proto = WorkerProtocol(
@@ -623,6 +635,7 @@ async def test_handler_interrupts_only_requested_subagent(monkeypatch) -> None:
                 json.dumps({
                     "op": "subagent.interrupt",
                     "subagent_id": "subagent-2",
+                    "reason": "subagent_cancelled_by_user",
                 }),
                 json.dumps({"op": "shutdown"}),
             ]
@@ -633,7 +646,9 @@ async def test_handler_interrupts_only_requested_subagent(monkeypatch) -> None:
 
     await proto.run()
 
-    assert interrupted == ["subagent-2"]
+    assert interrupted == [
+        ("subagent-2", "subagent_cancelled_by_user")
+    ]
 
 
 @pytest.mark.asyncio

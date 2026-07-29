@@ -204,23 +204,55 @@ def _unregister_subagent(subagent_id: str) -> None:
         _active_subagents.pop(subagent_id, None)
 
 
-def interrupt_subagent(subagent_id: str) -> bool:
-    """Request that a single running subagent stop at its next iteration boundary.
+def interrupt_subagent(
+    subagent_id: str,
+    *,
+    reason: str = "subagent_cancelled_by_user",
+) -> bool:
+    """Cancel one running subagent at its next iteration boundary.
 
     Does not hard-kill the worker thread (Python can't); sets the child's
     interrupt flag which propagates to in-flight tools and recurses into
-    grandchildren via AIAgent.interrupt().  Returns True if a matching
-    subagent was found.
+    grandchildren via AIAgent.interrupt().  The target branch is explicitly
+    marked ``cancelled`` before interrupt propagation so a user control action
+    cannot be confused with an unexpected runtime interruption.  Returns True
+    if a matching subagent was found.
     """
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
+        if record:
+            branch_ids = {subagent_id}
+            changed = True
+            while changed:
+                changed = False
+                for candidate_id, candidate in _active_subagents.items():
+                    if (
+                        candidate_id not in branch_ids
+                        and candidate.get("parent_id") in branch_ids
+                    ):
+                        branch_ids.add(candidate_id)
+                        changed = True
+            branch_records = [
+                _active_subagents[candidate_id]
+                for candidate_id in branch_ids
+                if candidate_id in _active_subagents
+            ]
+        else:
+            branch_records = []
     if not record:
         return False
     agent = record.get("agent")
     if agent is None:
         return False
+    stable_reason = str(reason or "").strip() or "subagent_cancelled_by_user"
+    for branch_record in branch_records:
+        branch_agent = branch_record.get("agent")
+        if branch_agent is None:
+            continue
+        branch_agent._subagent_terminal_status = "cancelled"
+        branch_agent._subagent_termination_reason = stable_reason
     try:
-        agent.interrupt(f"Interrupted via TUI ({subagent_id})")
+        agent.interrupt(stable_reason)
     except Exception as exc:
         logger.debug("interrupt_subagent(%s) failed: %s", subagent_id, exc)
         return False

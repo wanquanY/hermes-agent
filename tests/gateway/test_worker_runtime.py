@@ -262,6 +262,7 @@ async def test_primary_dispatch_routes_targeted_subagent_interrupt_to_scoped_wor
             "method": "subagent.interrupt",
             "params": {
                 "subagent_id": "subagent-2",
+                "reason": "subagent_cancelled_by_user",
                 "conversation_session_id": "conversation-1",
                 "runtime_scope_key": "profile:agent-a",
                 "agent_profile_id": "agent-a",
@@ -275,7 +276,10 @@ async def test_primary_dispatch_routes_targeted_subagent_interrupt_to_scoped_wor
         (
             "profile:agent-a",
             "conversation-1",
-            SubagentInterruptFrame(subagent_id="subagent-2"),
+            SubagentInterruptFrame(
+                subagent_id="subagent-2",
+                reason="subagent_cancelled_by_user",
+            ),
         )
     ]
     assert transport.written == [{

@@ -49,7 +49,10 @@ def _(rid, params: dict) -> dict:
     subagent_id = str(params.get("subagent_id") or "").strip()
     if not subagent_id:
         return _err(rid, 4000, "subagent_id required")
-    ok = interrupt_subagent(subagent_id)
+    reason = str(
+        params.get("reason") or "subagent_cancelled_by_user"
+    ).strip() or "subagent_cancelled_by_user"
+    ok = interrupt_subagent(subagent_id, reason=reason)
     return _ok(rid, {"found": ok, "subagent_id": subagent_id})
 
 

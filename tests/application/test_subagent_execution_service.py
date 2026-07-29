@@ -110,6 +110,38 @@ def test_sync_single_uses_one_activity_and_run_state_machine(tmp_path) -> None:
     assert [event["payload"]["status"] for event in events] == ["running", "completed"]
 
 
+def test_abnormal_interrupt_remains_distinct_from_user_cancellation(tmp_path) -> None:
+    service = _service(tmp_path, ids=["activity", "run", "turn"])
+    plan = service.create_plan(
+        [_task(0, "child-session")],
+        mode=ExecutionMode.SYNC,
+    )
+    service.start(plan)
+
+    status = service.complete(
+        plan,
+        {
+            "results": [
+                {
+                    "task_index": 0,
+                    "status": "interrupted",
+                    "error": "provider stream ended unexpectedly",
+                }
+            ]
+        },
+    )
+
+    assert status == "interrupted"
+    assert service._db.activities.get(plan.activity_id)["status"] == "interrupted"
+    child = plan.children[0]
+    assert service._db.runs.get(child.run_id)["status"] == "interrupted"
+    events = service._db.runs.list_events_by_activity(
+        plan.activity_id,
+        include_internal=True,
+    )
+    assert events[-1]["payload"]["status"] == "interrupted"
+
+
 def test_fanout_has_parent_and_ordered_child_activities(tmp_path) -> None:
     service = _service(
         tmp_path,
@@ -252,7 +284,7 @@ def test_runtime_capacity_rejects_without_implicit_sync_fallback(tmp_path) -> No
     release.set()
 
 
-def test_child_activity_cancel_interrupts_only_target_and_root_aggregates_failure(
+def test_child_activity_cancel_interrupts_only_target_and_root_is_cancelled(
     tmp_path,
 ) -> None:
     service = _service(
@@ -300,7 +332,7 @@ def test_child_activity_cancel_interrupts_only_target_and_root_aggregates_failur
     assert runtime.active_count() == 0
     assert service._db.activities.get(plan.children[0].activity_id)["status"] == "cancelled"
     assert service._db.activities.get(plan.children[1].activity_id)["status"] == "completed"
-    assert service._db.activities.get(plan.activity_id)["status"] == "failed"
+    assert service._db.activities.get(plan.activity_id)["status"] == "cancelled"
 
 
 def test_persisted_child_cancel_is_observed_without_stopping_sibling(tmp_path) -> None:
@@ -358,7 +390,7 @@ def test_persisted_child_cancel_is_observed_without_stopping_sibling(tmp_path) -
     while runtime.active_count() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert service._db.activities.get(plan.children[1].activity_id)["status"] == "completed"
-    assert service._db.activities.get(plan.activity_id)["status"] == "failed"
+    assert service._db.activities.get(plan.activity_id)["status"] == "cancelled"
 
 
 def test_start_does_not_resurrect_pre_cancelled_activity(tmp_path) -> None:

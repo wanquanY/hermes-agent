@@ -366,7 +366,7 @@ def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
             target_profile_id TEXT,
             target_team_id TEXT,
             target_mission_id TEXT,
-            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled', 'interrupted')),
             prompt_summary TEXT,
             result_summary TEXT,
             result_json TEXT,

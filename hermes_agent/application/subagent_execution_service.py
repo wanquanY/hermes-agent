@@ -20,7 +20,9 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_TERMINAL_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "interrupted"}
+)
 
 
 class ExecutionMode(str, Enum):
@@ -608,16 +610,24 @@ class SubagentExecutionService:
         status = _text(value).lower()
         if status in {"completed", "success"}:
             return "completed"
-        if status in {"cancelled", "canceled", "interrupted"}:
+        if status in {"cancelled", "canceled"}:
             return "cancelled"
+        if status == "interrupted":
+            return "interrupted"
         return "failed"
 
     @staticmethod
     def _aggregate_status(statuses: list[str]) -> str:
         if statuses and all(status == "completed" for status in statuses):
             return "completed"
-        if statuses and all(status == "cancelled" for status in statuses):
+        if statuses and all(
+            status in {"completed", "cancelled"} for status in statuses
+        ):
             return "cancelled"
+        if statuses and all(
+            status in {"completed", "interrupted"} for status in statuses
+        ):
+            return "interrupted"
         return "failed"
 
 
