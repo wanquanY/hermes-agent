@@ -104,7 +104,16 @@ TOOLSETS = {
     },
 
     "dovie_presentation": {
-        "description": "Dovie desktop-native PowerPoint generation and local export",
+        "description": "Dovie desktop-native editable PowerPoint generation and local export",
+        "tools": ["dovie_presentation_inspect", "dovie_presentation_build"],
+        "includes": []
+    },
+
+    "dovie_presentation_legacy": {
+        "description": (
+            "Legacy Dovie image-backed PowerPoint generation. "
+            "Each slide is a single non-editable full-slide image."
+        ),
         "tools": [
             "dovie_presentation_generate",
             "dovie_presentation_regenerate_slide",

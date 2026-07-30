@@ -48,6 +48,28 @@ def test_artifact_target_paths_extracts_explicit_domain_tool_artifacts():
     ) == ["/workspace/review.pptx"]
 
 
+def test_editable_presentation_artifact_is_registered_from_explicit_contract():
+    assert artifact_target_paths(
+        "dovie_presentation_build",
+        {},
+        json.dumps(
+            {
+                "status": "completed",
+                "artifacts": [
+                    {
+                        "path": "/workspace/editable-review.pptx",
+                        "mime_type": (
+                            "application/vnd.openxmlformats-officedocument."
+                            "presentationml.presentation"
+                        ),
+                        "operation": "created",
+                    }
+                ],
+            }
+        ),
+    ) == ["/workspace/editable-review.pptx"]
+
+
 def test_artifact_payloads_preserve_modified_presentation_operation(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -340,6 +362,7 @@ def test_record_artifacts_persists_remote_image_generation_output(
         "tool_name": "dovie_image_generate",
         "source": "remote_media",
         "url": image_url,
+        "canonical_identity": created["origin"]["canonical_identity"],
         "run_id": "run-1",
         "turn_id": "turn-1",
     }
@@ -350,6 +373,57 @@ def test_record_artifacts_persists_remote_image_generation_output(
     assert listed["source"] == image_url
     assert listed["availability"] == "available"
     assert listed["origin"] == created["origin"]
+
+
+def test_record_artifacts_uses_materialized_image_as_single_canonical_artifact(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(gateway_store, "get_hermes_home", lambda: tmp_path)
+    gateway_store._DEFAULT_STORES.clear()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    image = workspace / "assets" / "generated-cat.png"
+    image.parent.mkdir()
+    image.write_bytes(b"png")
+    image_url = "https://cdn.example.com/images/generated-cat.png"
+
+    [created] = record_artifacts_from_tool_complete(
+        session_id="session-1",
+        tool_call_id="image-tool-1",
+        name="dovie_image_generate",
+        args={
+            "prompt": "cat",
+            "output_directory": "assets",
+        },
+        result=json.dumps(
+            {
+                "success": True,
+                "status": "completed",
+                "image_urls": [image_url],
+                "materialized": True,
+                "artifacts": [
+                    {
+                        "path": str(image),
+                        "title": "generated-cat.png",
+                        "mime_type": "image/png",
+                        "operation": "created",
+                        "source_url": image_url,
+                    }
+                ],
+            }
+        ),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+        origin={"run_id": "run-1", "turn_id": "turn-1"},
+    )
+
+    assert created["path"] == str(image)
+    assert created["origin"]["source"] == "materialized_remote_media"
+    assert created["origin"]["source_url"] == image_url
+    assert created["origin"]["canonical_identity"].startswith("remote-image:")
+    assert created["origin"]["materialized_from"].startswith("artifact:")
+    assert len(list_artifacts(session_id="session-1")) == 1
 
 
 def test_record_artifacts_ignores_failed_remote_image_generation(

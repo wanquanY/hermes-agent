@@ -18,7 +18,12 @@ PNG_DATA_URL = f"data:image/png;base64,{base64.b64encode(PNG_DATA).decode('ascii
 
 def test_dovie_presentation_toolset_is_configurable():
     from hermes_cli.tools_config import CONFIGURABLE_TOOLSETS
-    from tools.dovie_presentation_tools import DOVIE_PRESENTATION_GENERATE_SCHEMA
+    from model_tools import get_tool_definitions
+    from tools.dovie_presentation_tools import (
+        DOVIE_PRESENTATION_BUILD_SCHEMA,
+        DOVIE_PRESENTATION_GENERATE_SCHEMA,
+    )
+    from tools.presentation.slidespec_contract import SLIDESPEC_JSON_SCHEMA
 
     configurable = {
         name: (label, summary)
@@ -26,15 +31,122 @@ def test_dovie_presentation_toolset_is_configurable():
     }
 
     assert configurable["dovie_presentation"] == (
-        "📊 Dovie Presentation Generation",
+        "📊 Dovie Editable Presentation",
+        "dovie_presentation_inspect, dovie_presentation_build",
+    )
+    assert configurable["dovie_presentation_legacy"] == (
+        "🖼️ Dovie Image-backed Presentation (Legacy)",
         "dovie_presentation_generate, dovie_presentation_regenerate_slide",
     )
+    assert "Default tool for normal PowerPoint" in DOVIE_PRESENTATION_BUILD_SCHEMA[
+        "description"
+    ]
+    assert "non-editable full-slide image" in DOVIE_PRESENTATION_GENERATE_SCHEMA[
+        "description"
+    ]
+    editable_names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(
+            enabled_toolsets=["dovie_presentation"],
+            quiet_mode=True,
+        )
+    }
+    assert editable_names == {
+        "dovie_presentation_inspect",
+        "dovie_presentation_build",
+    }
+    legacy_names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(
+            enabled_toolsets=["dovie_presentation_legacy"],
+            quiet_mode=True,
+        )
+    }
+    assert legacy_names == {
+        "dovie_presentation_generate",
+        "dovie_presentation_regenerate_slide",
+    }
+    assert DOVIE_PRESENTATION_BUILD_SCHEMA["parameters"]["properties"]["slidespec"][
+        "properties"
+    ]["version"] == {"type": "string", "const": "slidespec/1"}
+    assert (
+        DOVIE_PRESENTATION_BUILD_SCHEMA["parameters"]["properties"]["slidespec"]
+        == {
+            **SLIDESPEC_JSON_SCHEMA,
+            "description": (
+                "Strict slidespec/1 document using exactly the element variants "
+                "declared here. Coordinates are normalized to 0..1. For a "
+                "rectangle use type='shape', kind='rect', and fill/fill_token. "
+                "Do not invent Figma-style rectangle, fills, or typography fields."
+            ),
+        }
+    )
+    element_variants = DOVIE_PRESENTATION_BUILD_SCHEMA["parameters"]["properties"][
+        "slidespec"
+    ]["properties"]["pages"]["items"]["properties"]["elements"]["items"]["oneOf"]
+    variants_by_type = {
+        variant["properties"]["type"]["const"]: variant
+        for variant in element_variants
+    }
+    assert set(variants_by_type) == {"text", "shape", "image", "chart", "table"}
+    assert variants_by_type["shape"]["properties"]["kind"]["enum"] == [
+        "ellipse",
+        "line",
+        "rect",
+        "roundRect",
+    ]
+    assert "fill" in variants_by_type["shape"]["properties"]
+    assert "fills" not in variants_by_type["shape"]["properties"]
+    assert "typography" not in variants_by_type["text"]["properties"]
     quality_schema = DOVIE_PRESENTATION_GENERATE_SCHEMA["parameters"]["properties"][
         "quality"
     ]
     assert "default" not in quality_schema
     assert "1K" not in quality_schema["description"]
     assert "2K" not in quality_schema["description"]
+
+
+def test_registered_editable_presentation_tool_uses_turn_scoped_workspace(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.dovie_presentation_tools as presentation_tools
+
+    captured = {}
+    monkeypatch.setattr(
+        presentation_tools,
+        "resolve_agent_cwd",
+        lambda: Path(tmp_path),
+    )
+
+    def fake_build(args, *, workspace_root):
+        captured["args"] = args
+        captured["workspace_root"] = workspace_root
+        return {
+            "dovie_event": "presentation_build_completed",
+            "status": "completed",
+        }
+
+    monkeypatch.setattr(
+        presentation_tools,
+        "build_editable_presentation",
+        fake_build,
+    )
+
+    result = json.loads(
+        presentation_tools.dovie_presentation_build(
+            {
+                "title": "Editable",
+                "slidespec": {
+                    "version": "slidespec/1",
+                    "pages": [],
+                },
+            }
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert captured["workspace_root"] == str(tmp_path)
 
 
 def test_registered_presentation_tool_uses_turn_scoped_workspace(

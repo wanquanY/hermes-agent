@@ -28,6 +28,10 @@ and MoonshotAI/kimi-cli#1595:
    ``items`` to the first element schema (or ``{}`` if the tuple is empty).
    (Ported from anomalyco/opencode#24730.)
 6. Every object schema must carry a ``required`` array, even when empty.
+7. A property named by ``required`` inside an ``anyOf`` branch must also be
+   declared in that branch's own ``properties`` map.  Standard JSON Schema
+   permits the declaration to live on the parent object, but Moonshot does
+   not resolve that inheritance while validating its flavored subset.
 
 The ``#/definitions/...`` → ``#/$defs/...`` rewrite for draft-07 refs is
 handled separately in ``tools/mcp_tool._normalize_mcp_input_schema`` so it
@@ -109,6 +113,35 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
     # Collapse the anyOf to the first non-null branch and infer its type.
     if "anyOf" in repaired and isinstance(repaired["anyOf"], list):
         repaired.pop("type", None)
+        parent_properties = repaired.get("properties")
+        if isinstance(parent_properties, dict):
+            repaired_branches: List[Any] = []
+            for branch in repaired["anyOf"]:
+                if not isinstance(branch, dict):
+                    repaired_branches.append(branch)
+                    continue
+                required = branch.get("required")
+                if not isinstance(required, list):
+                    repaired_branches.append(branch)
+                    continue
+                branch_properties = branch.get("properties")
+                declared = (
+                    dict(branch_properties)
+                    if isinstance(branch_properties, dict)
+                    else {}
+                )
+                for property_name in required:
+                    if (
+                        property_name not in declared
+                        and property_name in parent_properties
+                    ):
+                        declared[property_name] = copy.deepcopy(
+                            parent_properties[property_name]
+                        )
+                if declared:
+                    branch = {**branch, "properties": declared}
+                repaired_branches.append(branch)
+            repaired["anyOf"] = repaired_branches
         non_null = [b for b in repaired["anyOf"]
                     if isinstance(b, dict) and b.get("type") != "null"]
         if non_null and len(non_null) < len(repaired["anyOf"]):

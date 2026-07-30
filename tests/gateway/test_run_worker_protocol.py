@@ -46,8 +46,9 @@ from tui_gateway.run_worker import (
 )
 
 
-def test_prepare_worker_runtime_discovers_mcp_before_tool_snapshot(monkeypatch) -> None:
+def test_prepare_worker_runtime_syncs_skills_before_tool_discovery(monkeypatch) -> None:
     import run_agent
+    from tools import skills_sync
     from tui_gateway.services import agent_runner, capability_runtime
 
     calls: list[str] = []
@@ -55,6 +56,11 @@ def test_prepare_worker_runtime_discovers_mcp_before_tool_snapshot(monkeypatch) 
         agent_runner,
         "setup_worker_environment",
         lambda: calls.append("environment"),
+    )
+    monkeypatch.setattr(
+        skills_sync,
+        "sync_skills",
+        lambda **_kwargs: calls.append("skills") or {},
     )
     monkeypatch.setattr(
         capability_runtime,
@@ -69,9 +75,60 @@ def test_prepare_worker_runtime_discovers_mcp_before_tool_snapshot(monkeypatch) 
 
     stages = _prepare_worker_runtime()
 
-    assert calls == ["environment", "mcp", "schemas"]
+    assert calls == ["skills", "environment", "mcp", "schemas"]
+    assert "bundled_skills" in stages
     assert "mcp_tool_discovery" in stages
     assert "default_tool_catalog" in stages
+
+
+def test_prepare_worker_runtime_materializes_bundled_skills(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import run_agent
+    from tools import skills_sync
+    from tui_gateway.services import agent_runner, capability_runtime
+
+    bundled_root = tmp_path / "bundled"
+    bundled_skill = bundled_root / "deck-builder"
+    bundled_skill.mkdir(parents=True)
+    (bundled_skill / "SKILL.md").write_text(
+        "---\nname: deck-builder\n---\n# Deck builder\n",
+        encoding="utf-8",
+    )
+    installed_skills = tmp_path / "hermes-home" / "skills"
+
+    monkeypatch.setattr(skills_sync, "SKILLS_DIR", installed_skills)
+    monkeypatch.setattr(
+        skills_sync,
+        "MANIFEST_FILE",
+        installed_skills / ".bundled_manifest",
+    )
+    monkeypatch.setattr(skills_sync, "_get_bundled_dir", lambda: bundled_root)
+
+    def assert_skill_exists_before_gateway_imports() -> None:
+        assert (installed_skills / "deck-builder" / "SKILL.md").is_file()
+
+    monkeypatch.setattr(
+        agent_runner,
+        "setup_worker_environment",
+        assert_skill_exists_before_gateway_imports,
+    )
+    monkeypatch.setattr(
+        capability_runtime,
+        "bootstrap_profile_mcp_runtime",
+        lambda: [],
+    )
+    monkeypatch.setattr(run_agent, "get_tool_definitions", lambda **_kwargs: [])
+
+    _prepare_worker_runtime()
+
+    assert (
+        installed_skills / "deck-builder" / "SKILL.md"
+    ).read_text(encoding="utf-8").endswith("# Deck builder\n")
+    assert "deck-builder:" in (
+        installed_skills / ".bundled_manifest"
+    ).read_text(encoding="utf-8")
 
 
 # ── decode_incoming ──────────────────────────────────────────────────

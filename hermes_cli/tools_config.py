@@ -57,7 +57,12 @@ CONFIGURABLE_TOOLSETS = [
     ("dovie_video",     "🎬 Dovie Video Generation",   "dovie_video_generate"),
     (
         "dovie_presentation",
-        "📊 Dovie Presentation Generation",
+        "📊 Dovie Editable Presentation",
+        "dovie_presentation_inspect, dovie_presentation_build",
+    ),
+    (
+        "dovie_presentation_legacy",
+        "🖼️ Dovie Image-backed Presentation (Legacy)",
         "dovie_presentation_generate, dovie_presentation_regenerate_slide",
     ),
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),

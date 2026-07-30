@@ -243,6 +243,32 @@ def test_presentation_generation_keeps_structured_result():
     assert tool_complete["payload"]["result"]["output_path"] == "/tmp/review.pptx"
 
 
+def test_editable_presentation_build_keeps_structured_result():
+    events = []
+    bridge = _bridge(events)
+
+    bridge.on_tool_complete(
+        "sid",
+        "tool-editable-presentation",
+        "dovie_presentation_build",
+        {"title": "Review", "slidespec": {"version": "slidespec/1"}},
+        json.dumps(
+            {
+                "dovie_event": "presentation_build_completed",
+                "status": "completed",
+                "title": "Review",
+                "page_count": 1,
+                "output_path": "/tmp/review.pptx",
+                "artifacts": [],
+            }
+        ),
+    )
+
+    tool_complete = next(event for event in events if event["type"] == "tool.complete")
+    assert tool_complete["payload"]["result"]["status"] == "completed"
+    assert tool_complete["payload"]["result"]["output_path"] == "/tmp/review.pptx"
+
+
 def test_presentation_slide_regeneration_keeps_structured_result():
     events = []
     bridge = _bridge(events)

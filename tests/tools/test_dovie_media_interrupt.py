@@ -1,3 +1,4 @@
+import json
 import threading
 
 import tools.dovie_media_tools as dovie_media_tools
@@ -52,6 +53,86 @@ def test_image_generate_forwards_explicit_model(monkeypatch):
     assert captured["payload"]["aspect_ratio"] == "16:9"
     assert captured["payload"]["generate_num"] == 2
     assert captured["payload"]["quality"] == "high"
+
+
+def test_image_generate_materializes_outputs_as_workspace_artifacts(
+    monkeypatch,
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(dovie_media_tools, "_active_workspace_root", lambda: workspace)
+    monkeypatch.setattr(
+        dovie_media_tools,
+        "_async_media_proxy_result",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "success": True,
+                "status": "completed",
+                "image_urls": [
+                    "https://cdn.example.com/first.png",
+                    "https://cdn.example.com/second.png",
+                ],
+            }
+        ),
+    )
+
+    def fake_download(url, destination):
+        destination.write_bytes(url.encode("utf-8"))
+        return destination.stat().st_size, "image/png"
+
+    monkeypatch.setattr(dovie_media_tools, "_download_generated_image", fake_download)
+
+    result = json.loads(
+        dovie_media_tools.dovie_image_generate(
+            {
+                "prompt": "test",
+                "output_directory": "assets/deck",
+                "file_stem": "hero",
+            }
+        )
+    )
+
+    expected_paths = [
+        workspace / "assets" / "deck" / "hero-01.png",
+        workspace / "assets" / "deck" / "hero-02.png",
+    ]
+    assert result["materialized"] is True
+    assert result["local_paths"] == [str(path) for path in expected_paths]
+    assert [artifact["source_url"] for artifact in result["artifacts"]] == [
+        "https://cdn.example.com/first.png",
+        "https://cdn.example.com/second.png",
+    ]
+    assert all(path.is_file() for path in expected_paths)
+
+
+def test_image_generate_rejects_materialization_outside_workspace(
+    monkeypatch,
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(dovie_media_tools, "_active_workspace_root", lambda: workspace)
+    monkeypatch.setattr(
+        dovie_media_tools,
+        "_async_media_proxy_result",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "success": True,
+                "status": "completed",
+                "image_url": "https://cdn.example.com/image.png",
+            }
+        ),
+    )
+
+    result = dovie_media_tools.dovie_image_generate(
+        {
+            "prompt": "test",
+            "output_directory": str(tmp_path / "outside"),
+        }
+    )
+
+    assert "inside the active workspace" in result
 
 
 def test_image_generate_uploads_local_workspace_reference_before_generation(

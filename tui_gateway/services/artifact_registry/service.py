@@ -51,6 +51,10 @@ def _remote_artifact_id(workspace_id: str, url: str) -> str:
     return "artifact:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def _remote_image_identity(url: str) -> str:
+    return "remote-image:" + hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
 def _http_url(value: object) -> str:
     text = str(value or "").strip()
     try:
@@ -99,6 +103,26 @@ def _remote_image_urls(name: str, result: str) -> list[str]:
     return urls
 
 
+def _materialized_remote_image_urls(result: str) -> set[str]:
+    try:
+        data = json.loads(result)
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    artifacts = data.get("artifacts")
+    if not isinstance(artifacts, list):
+        return set()
+    urls: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        url = _http_url(artifact.get("source_url") or artifact.get("sourceUrl"))
+        if url:
+            urls.add(url)
+    return urls
+
+
 def _remote_image_artifact_records(
     *,
     tool_call_id: str,
@@ -108,7 +132,10 @@ def _remote_image_artifact_records(
     origin: dict[str, Any] | None,
 ) -> list[ArtifactRecord]:
     records: list[ArtifactRecord] = []
+    materialized_urls = _materialized_remote_image_urls(result)
     for index, url in enumerate(_remote_image_urls(name, result), start=1):
+        if url in materialized_urls:
+            continue
         parsed = urlparse(url)
         title = unquote(parsed.path.rstrip("/").split("/")[-1]) or f"生成图片 {index}"
         mime_type = mimetypes.guess_type(parsed.path)[0] or "image/png"
@@ -128,6 +155,7 @@ def _remote_image_artifact_records(
                     "tool_name": name,
                     "source": "remote_media",
                     "url": url,
+                    "canonical_identity": _remote_image_identity(url),
                     **dict(origin or {}),
                 },
             )
@@ -238,6 +266,19 @@ def _artifact_records_from_tool_complete(
             artifact_origin["operation"] = operation
         if is_workspace_diff:
             artifact_origin["source"] = "workspace_diff"
+        source_url = _http_url(target.source_url)
+        if source_url:
+            artifact_origin.update(
+                {
+                    "source": "materialized_remote_media",
+                    "source_url": source_url,
+                    "canonical_identity": _remote_image_identity(source_url),
+                    "materialized_from": _remote_artifact_id(
+                        workspace_payload["id"],
+                        source_url,
+                    ),
+                }
+            )
         if operation == "deleted":
             records.append(
                 ArtifactRecord(

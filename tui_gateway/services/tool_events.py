@@ -25,6 +25,7 @@ DOVIE_STRUCTURED_RESULT_TOOLS = {
     "dovie_automation_task_list",
     "dovie_automation_task_update",
     "dovie_automation_task_remove",
+    "dovie_presentation_build",
     "dovie_presentation_generate",
     "dovie_presentation_regenerate_slide",
     "team_mission_start_task",
@@ -120,6 +121,10 @@ def _dovie_structured_tool_result(name: str, result: str) -> dict | None:
         }:
             return None
         return data
+    if name == "dovie_presentation_build":
+        if event_name != "presentation_build_completed":
+            return None
+        return data if data.get("status") == "completed" else None
     if name == "dovie_presentation_regenerate_slide":
         if event_name != "presentation_slide_regenerated":
             return None

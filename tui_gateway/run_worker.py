@@ -1063,6 +1063,22 @@ def _prepare_worker_runtime() -> dict[str, float]:
 
     stages: dict[str, float] = {}
     started = time.perf_counter()
+    from tools.skills_sync import sync_skills
+
+    # ``run_worker`` is a standalone runtime entrypoint, not a child of
+    # ``hermes gateway run``.  It therefore owns the same bundled-skill
+    # bootstrap invariant as the normal gateway process.  This must happen
+    # before ``setup_worker_environment`` imports the legacy server stack:
+    # those imports can initialize the skill catalog/prompt cache, and a
+    # first-run skill copied afterwards would remain invisible for the
+    # lifetime of the worker.
+    sync_skills(quiet=True)
+    stages["bundled_skills"] = round(
+        (time.perf_counter() - started) * 1000,
+        3,
+    )
+
+    started = time.perf_counter()
     from tui_gateway.services.agent_runner import setup_worker_environment
 
     setup_worker_environment()

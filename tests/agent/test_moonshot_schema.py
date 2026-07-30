@@ -11,6 +11,8 @@ the JSON Schema ecosystem accepts:
    (Ported from anomalyco/opencode#24730.)
 4. Tuple-style ``items`` arrays — Moonshot requires a single item schema,
    not positional ones. (Ported from anomalyco/opencode#24730.)
+5. ``anyOf.required`` names inherited from a parent object — Moonshot requires
+   those properties to be redeclared inside the branch.
 
 These tests cover the repairs applied by ``agent/moonshot_schema.py``.
 """
@@ -183,6 +185,70 @@ class TestAnyOfParentType:
         assert "anyOf" not in db_type
         assert db_type["type"] == "string"
         assert db_type["enum"] == ["mysql", "postgresql"]  # "" stripped by enum cleanup
+
+    def test_anyof_required_inherits_parent_property_schema(self):
+        params = {
+            "type": "object",
+            "properties": {
+                "page": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                            },
+                        },
+                        "elements": {
+                            "type": "array",
+                            "items": {"type": "object", "properties": {}},
+                        },
+                    },
+                    "anyOf": [
+                        {"required": ["content"]},
+                        {"required": ["elements"]},
+                    ],
+                },
+            },
+        }
+
+        out = sanitize_moonshot_tool_parameters(params)
+        branches = out["properties"]["page"]["anyOf"]
+
+        assert branches[0]["required"] == ["content"]
+        assert branches[0]["properties"] == {
+            "content": out["properties"]["page"]["properties"]["content"]
+        }
+        assert branches[1]["required"] == ["elements"]
+        assert branches[1]["properties"] == {
+            "elements": out["properties"]["page"]["properties"]["elements"]
+        }
+
+
+def test_editable_presentation_schema_satisfies_moonshot_required_locality():
+    """Regression for Kimi HTTP 400 on SlideSpec page/text alternatives."""
+    from tools.dovie_presentation_tools import DOVIE_PRESENTATION_BUILD_SCHEMA
+
+    schema = sanitize_moonshot_tool_parameters(
+        DOVIE_PRESENTATION_BUILD_SCHEMA["parameters"]
+    )
+
+    def assert_required_properties_are_local(node):
+        if isinstance(node, list):
+            for child in node:
+                assert_required_properties_are_local(child)
+            return
+        if not isinstance(node, dict):
+            return
+        required = node.get("required")
+        if isinstance(required, list) and required:
+            properties = node.get("properties")
+            assert isinstance(properties, dict)
+            assert set(required).issubset(properties)
+        for child in node.values():
+            assert_required_properties_are_local(child)
+
+    assert_required_properties_are_local(schema)
 
 
 class TestRefSiblingStripping:

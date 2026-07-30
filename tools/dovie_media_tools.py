@@ -27,6 +27,7 @@ DOVIE_MEDIA_PROXY_MAX_TIMEOUT_SECONDS = 1800
 DOVIE_MEDIA_PROXY_DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 DOVIE_MEDIA_PROXY_DEFAULT_POLL_INTERVAL_SECONDS = 2
 DOVIE_MEDIA_REFERENCE_DEFAULT_MAX_BYTES = 20 * 1024 * 1024
+DOVIE_MEDIA_GENERATED_IMAGE_DEFAULT_MAX_BYTES = 50 * 1024 * 1024
 
 
 DOVIE_IMAGE_GENERATE_SCHEMA = {
@@ -96,6 +97,29 @@ DOVIE_IMAGE_GENERATE_SCHEMA = {
                     "Optional provider-native quality override. Omit unless the user "
                     "explicitly requests a quality; never infer a value. The Dovie Admin "
                     "model configuration supplies the supported default."
+                ),
+            },
+            "output_directory": {
+                "type": "string",
+                "description": (
+                    "Optional directory inside the active workspace where every generated "
+                    "image must be materialized as a durable local artifact. Use this when "
+                    "the images will be reused in a presentation, document, or later tool."
+                ),
+            },
+            "file_stem": {
+                "type": "string",
+                "description": (
+                    "Optional safe filename stem for materialized images. It is only used "
+                    "when output_directory is provided."
+                ),
+                "maxLength": 80,
+            },
+            "overwrite": {
+                "type": "boolean",
+                "description": (
+                    "Replace existing files with the same generated names. Defaults to "
+                    "false; otherwise unique filenames are selected."
                 ),
             },
         },
@@ -643,6 +667,208 @@ def _normalize_video_ratio(value: Any) -> str:
     return text
 
 
+def _generated_image_urls(result: dict[str, Any]) -> list[str]:
+    containers = [
+        result,
+        result.get("data") if isinstance(result.get("data"), dict) else {},
+        result.get("result") if isinstance(result.get("result"), dict) else {},
+    ]
+    candidates: list[Any] = []
+    for container in containers:
+        candidates.extend(
+            (
+                container.get("image_urls"),
+                container.get("image_url"),
+                container.get("images"),
+            )
+        )
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        values = candidate if isinstance(candidate, list) else [candidate]
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("url") or value.get("image_url") or value.get("src")
+            text = str(value or "").strip()
+            try:
+                parsed = urllib.parse.urlsplit(text)
+            except ValueError:
+                continue
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+                continue
+            if text not in seen:
+                seen.add(text)
+                urls.append(text)
+    return urls
+
+
+def _safe_generated_output_directory(value: Any) -> Path:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("output_directory is required for image materialization")
+    workspace_root = _active_workspace_root()
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace_root / candidate
+    resolved = candidate.resolve()
+    if not _path_is_inside(resolved, workspace_root):
+        raise ValueError("output_directory must be inside the active workspace")
+    resolved.mkdir(parents=True, exist_ok=True)
+    if not resolved.is_dir():
+        raise ValueError("output_directory must resolve to a directory")
+    return resolved
+
+
+def _safe_generated_file_stem(value: Any) -> str:
+    stem = re.sub(r"[^0-9A-Za-z._\-\u4e00-\u9fff]+", "-", str(value or "").strip())
+    stem = stem.strip(" .-_")[:80]
+    return stem or "generated-image"
+
+
+def _generated_image_extension(url: str) -> str:
+    suffix = Path(urllib.parse.urlsplit(url).path).suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+    return ".png"
+
+
+def _available_generated_path(
+    directory: Path,
+    stem: str,
+    extension: str,
+    *,
+    index: int,
+    count: int,
+    overwrite: bool,
+) -> Path:
+    numbered_stem = f"{stem}-{index:02d}" if count > 1 else stem
+    candidate = directory / f"{numbered_stem}{extension}"
+    if overwrite or not candidate.exists():
+        return candidate
+    suffix = 2
+    while True:
+        candidate = directory / f"{numbered_stem}-{suffix}{extension}"
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
+def _download_generated_image(url: str, destination: Path) -> tuple[int, str]:
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "image/*"},
+        method="GET",
+    )
+    max_bytes = _env_int(
+        "DOVIE_MEDIA_GENERATED_IMAGE_MAX_BYTES",
+        DOVIE_MEDIA_GENERATED_IMAGE_DEFAULT_MAX_BYTES,
+    )
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
+    size = 0
+    content_type = ""
+    try:
+        with urllib.request.urlopen(request, timeout=_request_timeout()) as response:
+            content_type = str(response.headers.get_content_type() or "").strip().lower()
+            with temporary.open("xb") as output:
+                while True:
+                    _raise_if_interrupted("Dovie generated image download interrupted")
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise ValueError(
+                            f"generated image exceeds the {max_bytes // (1024 * 1024)} MB limit"
+                        )
+                    output.write(chunk)
+        if size <= 0:
+            raise RuntimeError("generated image download returned an empty file")
+        os.replace(temporary, destination)
+    except (TimeoutError, socket.timeout) as exc:
+        raise RuntimeError("Dovie generated image download timed out") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Dovie generated image download failed: {exc}") from exc
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    mime_type = content_type if content_type.startswith("image/") else (
+        mimetypes.guess_type(destination.name)[0] or "image/png"
+    )
+    return size, mime_type
+
+
+def _materialize_generated_images(
+    result: dict[str, Any],
+    *,
+    output_directory: Any,
+    file_stem: Any,
+    overwrite: bool,
+) -> dict[str, Any]:
+    urls = _generated_image_urls(result)
+    if not urls:
+        raise RuntimeError("Dovie image generation returned no usable image URLs")
+    directory = _safe_generated_output_directory(output_directory)
+    stem = _safe_generated_file_stem(file_stem)
+    created: list[Path] = []
+    backups: dict[Path, Path] = {}
+    artifacts: list[dict[str, Any]] = []
+    try:
+        for index, url in enumerate(urls, start=1):
+            destination = _available_generated_path(
+                directory,
+                stem,
+                _generated_image_extension(url),
+                index=index,
+                count=len(urls),
+                overwrite=overwrite,
+            )
+            if overwrite and destination.exists():
+                backup = destination.with_name(
+                    f".{destination.name}.{uuid.uuid4().hex}.backup"
+                )
+                os.replace(destination, backup)
+                backups[destination] = backup
+            size, mime_type = _download_generated_image(url, destination)
+            created.append(destination)
+            artifacts.append(
+                {
+                    "path": str(destination),
+                    "title": destination.name,
+                    "mime_type": mime_type,
+                    "size_bytes": size,
+                    "operation": "created",
+                    "source_url": url,
+                }
+            )
+    except Exception:
+        for path in created:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for destination, backup in backups.items():
+            try:
+                if backup.exists():
+                    os.replace(backup, destination)
+            except OSError:
+                pass
+        raise
+    for backup in backups.values():
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    materialized = dict(result)
+    materialized["artifacts"] = artifacts
+    materialized["local_paths"] = [artifact["path"] for artifact in artifacts]
+    materialized["materialized"] = True
+    return materialized
+
+
 def dovie_image_generate(args: dict[str, Any]) -> str:
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
@@ -672,7 +898,32 @@ def dovie_image_generate(args: dict[str, Any]) -> str:
         payload["quality"] = quality
     if model:
         payload["model"] = model
-    return _async_media_proxy_result("DOVIE_IMAGE_GENERATE_PROXY_URL", payload)
+    raw_result = _async_media_proxy_result("DOVIE_IMAGE_GENERATE_PROXY_URL", payload)
+    output_directory = str(args.get("output_directory") or "").strip()
+    if not output_directory:
+        return raw_result
+    try:
+        result = json.loads(raw_result)
+    except (TypeError, ValueError):
+        return raw_result
+    if not isinstance(result, dict) or result.get("error"):
+        return raw_result
+    if result.get("success") is False or str(result.get("status") or "").lower() in {
+        "error",
+        "failed",
+        "cancelled",
+    }:
+        return raw_result
+    try:
+        materialized = _materialize_generated_images(
+            result,
+            output_directory=output_directory,
+            file_stem=args.get("file_stem"),
+            overwrite=bool(args.get("overwrite", False)),
+        )
+    except Exception as exc:
+        return tool_error(str(exc))
+    return json.dumps(materialized, ensure_ascii=False)
 
 
 def dovie_video_generate(args: dict[str, Any]) -> str:

@@ -13,6 +13,7 @@ class ArtifactTarget:
     operation: str = ""
     title: str = ""
     mime_type: str = ""
+    source_url: str = ""
 
 
 def parse_tool_result_dict(result: str) -> dict:
@@ -133,6 +134,11 @@ def result_artifact_targets(data: dict) -> list[ArtifactTarget]:
                     value.get("mime_type")
                     or value.get("mimeType")
                     or value.get("mime")
+                    or ""
+                ).strip(),
+                source_url=str(
+                    value.get("source_url")
+                    or value.get("sourceUrl")
                     or ""
                 ).strip(),
             )
