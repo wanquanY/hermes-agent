@@ -26,9 +26,13 @@ DOVIE_PRESENTATION_BUILD_SCHEMA = {
         "Text, shapes, local images, charts, tables, speaker notes, and sources "
         "remain native PowerPoint objects; no generated JavaScript is executed. "
         "Load the deck-builder skill before authoring. For image-led layouts, "
-        "create or obtain meaningful assets first, save them locally, and pass "
-        "their workspace paths. After building, repair every diagnostic and use "
-        "vision_analyze on every preview page before delivery. "
+        "choose the target layout first, create or obtain meaningful assets at "
+        "an aspect ratio close to each physical visual slot, save them locally, "
+        "and pass their workspace paths. Images preserve their source geometry; "
+        "stretch is forbidden. After building, repair every diagnostic, load "
+        "every preview page with vision_analyze, and have a vision-capable "
+        "current authoring model inspect the raw pixels itself before delivery. "
+        "Use auxiliary vision analysis only when the current model is non-vision. "
         "Use this tool unless the user explicitly requests flattened, image-only, "
         "or non-editable slides."
     ),
@@ -99,8 +103,9 @@ DOVIE_PRESENTATION_INSPECT_SCHEMA = {
     "description": (
         "Inspect a supplied or existing PPTX before authoring. Safely extracts "
         "its page ratio, Office theme colors, theme fonts, and layout names, "
-        "and renders local page previews for vision_analyze. Use this first "
-        "for every reference-deck, template-following, or existing-deck request."
+        "and renders local page previews that vision_analyze can load into the "
+        "current authoring model's native visual context. Use this first for "
+        "every reference-deck, template-following, or existing-deck request."
     ),
     "parameters": {
         "type": "object",

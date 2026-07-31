@@ -217,6 +217,30 @@ def test_normalize_slidespec_accepts_semantic_editorial_layout(tmp_path):
     assert normalized["pages"][0]["content"]["image_src"] == str(image_path.resolve())
     assert normalized["pages"][1]["content"]["metrics"][1]["value"] == "100%"
 
+
+def test_normalize_slidespec_rejects_stretch_on_semantic_image(tmp_path):
+    image_path = tmp_path / "hero.png"
+    image_path.write_bytes(b"png")
+    spec = {
+        "version": "slidespec/1",
+        "title": "No distorted evidence",
+        "pages": [
+            {
+                "id": "split",
+                "layout": "editorial-split",
+                "content": {
+                    "title": "Preserve image geometry",
+                    "image_src": str(image_path),
+                    "image_fit": "stretch",
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="stretch is forbidden"):
+        normalize_slidespec(spec, workspace_root=str(tmp_path))
+
+
 def test_normalize_slidespec_accepts_dovie_grid_templates_and_items(tmp_path):
     spec = {
         "version": "slidespec/1",
@@ -317,6 +341,18 @@ def test_normalize_slidespec_accepts_dovie_grid_templates_and_items(tmp_path):
             ),
             "replace fills with one fill or fill_token",
         ),
+        (
+            lambda spec: spec["pages"][0]["elements"].append(
+                {
+                    "id": "distorted-image",
+                    "type": "image",
+                    "box": [0.1, 0.1, 0.4, 0.4],
+                    "src": "image.png",
+                    "fit": "stretch",
+                }
+            ),
+            "stretch is forbidden",
+        ),
     ],
 )
 def test_normalize_slidespec_rejects_invalid_contract(tmp_path, mutate, message):
@@ -367,13 +403,16 @@ def test_build_editable_presentation_invokes_controlled_renderer(
     assert result["quality"] == {
         "status": "passed",
         "structural_status": "passed",
-        "visual_status": "skipped",
-        "issue_count": 0,
-        "requirements": (
-            "Repair every structural issue, inspect every rendered page with "
-            "vision_analyze at readable size, then rebuild until clean."
-        ),
-    }
+            "visual_status": "skipped",
+            "issue_count": 0,
+            "requirements": (
+                "Repair every structural issue, load every rendered page with "
+                "vision_analyze at readable size, and rebuild until clean. A "
+                "vision-capable current authoring model must inspect the raw pixels "
+                "itself; auxiliary vision analysis is the fallback only for a "
+                "non-vision current model."
+            ),
+        }
     assert result["artifacts"] == [
         {
             "path": str(output),

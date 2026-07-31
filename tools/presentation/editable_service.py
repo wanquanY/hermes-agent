@@ -20,6 +20,7 @@ from tools.presentation.slidespec_contract import (
     CHART_SERIES_KEYS,
     ELEMENT_KEYS,
     ELEMENT_TYPES,
+    IMAGE_FITS,
     PAGE_CONTENT_KEYS,
     PAGE_KEYS,
     PAGE_LAYOUTS,
@@ -308,6 +309,11 @@ def _normalize_page_content(
             image_src,
             workspace_root=workspace_root,
         )
+    image_fit = str(content.get("image_fit") or "cover")
+    if image_fit not in IMAGE_FITS:
+        raise ValueError(
+            f"{label}.image_fit must be cover or contain; stretch is forbidden"
+        )
     for collection_key, allowed_keys in (
         ("metrics", PAGE_METRIC_KEYS),
         ("steps", PAGE_STEP_KEYS),
@@ -383,6 +389,11 @@ def _normalize_element(
         if str(element.get("kind") or "rect") not in SHAPE_KINDS:
             raise ValueError(f"{label}.kind is unsupported")
     elif element_type == "image":
+        image_fit = str(element.get("fit") or "contain")
+        if image_fit not in IMAGE_FITS:
+            raise ValueError(
+                f"{label}.fit must be cover or contain; stretch is forbidden"
+            )
         element["src"] = _resolve_asset_path(
             str(element.get("src") or ""),
             workspace_root=workspace_root,
@@ -684,8 +695,9 @@ def inspect_reference_presentation(
         "dovie_event": "presentation_reference_inspected",
         "status": "completed",
         "message": (
-            "Reference presentation inspected. Analyze every preview page before "
-            "authoring and pass presentation_path as reference_deck_path when building."
+            "Reference presentation inspected. Load every preview page into the "
+            "current authoring model's native visual context before authoring, "
+            "and pass presentation_path as reference_deck_path when building."
         ),
         "reference_deck": style.as_dict(),
         "preview": preview,
@@ -775,8 +787,11 @@ def build_editable_presentation(
         "visual_status": visual_status,
         "issue_count": issue_count,
         "requirements": (
-            "Repair every structural issue, inspect every rendered page with "
-            "vision_analyze at readable size, then rebuild until clean."
+            "Repair every structural issue, load every rendered page with "
+            "vision_analyze at readable size, and rebuild until clean. A "
+            "vision-capable current authoring model must inspect the raw pixels "
+            "itself; auxiliary vision analysis is the fallback only for a "
+            "non-vision current model."
         ),
     }
     return {

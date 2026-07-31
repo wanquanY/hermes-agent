@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -54,6 +55,16 @@ class TestSupportsMediaInToolResults:
 
     def test_gemini_2_no(self):
         assert _supports_media_in_tool_results("google", "gemini-2.5-pro") is False
+
+    def test_kimi_uses_declared_tool_result_transport_capability(self):
+        # Vision is a per-model fact supplied by the runtime descriptor.  The
+        # provider profile only needs to confirm that its wire protocol can
+        # carry image blocks in a tool result.
+        assert _supports_media_in_tool_results("kimi-coding", "kimi-k3") is True
+        assert _supports_media_in_tool_results("kimi-coding-cn", "kimi-k3") is True
+
+    def test_provider_that_rejects_image_tool_results_stays_on_fallback(self):
+        assert _supports_media_in_tool_results("xiaomi", "mimo-v2.5") is False
 
     def test_unknown_provider_conservative_no(self):
         assert _supports_media_in_tool_results("brand-new-provider", "any-model") is False
@@ -121,7 +132,7 @@ class TestVisionAnalyzeNative:
         assert isinstance(result, str)
         parsed = json.loads(result)
         assert parsed.get("success") is False
-        assert "Invalid image source" in parsed.get("error", "")
+        assert "image file not found" in parsed.get("error", "").lower()
 
     def test_empty_image_url_returns_error(self):
         result = asyncio.get_event_loop().run_until_complete(
@@ -191,6 +202,32 @@ class TestHandleVisionAnalyzeFastPath:
 
         assert not (isinstance(result, dict) and result.get("_multimodal") is True), \
             "Fast path fired for non-vision model; should have fallen through to aux LLM"
+
+    def test_kimi_vision_model_returns_pixels_to_the_current_model(self, tmp_path):
+        """Kimi K3 must self-review the image rather than consume aux text."""
+        img = tmp_path / "x.png"
+        img.write_bytes(_TINY_PNG)
+
+        from agent.auxiliary_client import set_runtime_main, clear_runtime_main
+        set_runtime_main("kimi-coding", "kimi-k3")
+        try:
+            with patch(
+                "tools.vision_tools.vision_analyze_tool",
+            ) as auxiliary_analyze:
+                coro = _handle_vision_analyze({
+                    "image_url": str(img),
+                    "question": "Inspect this slide.",
+                }, parent_agent=SimpleNamespace(
+                    model_descriptor={"vision_enabled": True},
+                ))
+                result = asyncio.get_event_loop().run_until_complete(coro)
+        finally:
+            clear_runtime_main()
+
+        assert isinstance(result, dict)
+        assert result.get("_multimodal") is True
+        assert result.get("meta", {}).get("native_vision") is True
+        auxiliary_analyze.assert_not_called()
 
     def test_fast_path_disabled_for_unsupported_provider(self, tmp_path, monkeypatch):
         """Even with vision-capable model, unknown provider → fall through."""

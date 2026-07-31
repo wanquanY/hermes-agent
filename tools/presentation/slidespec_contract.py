@@ -40,6 +40,7 @@ THEME_SCALE_TOKENS = frozenset(
     {"display", "title", "h2", "body", "caption", "metric"}
 )
 ELEMENT_TYPES = frozenset({"text", "shape", "image", "chart", "table"})
+IMAGE_FITS = frozenset({"cover", "contain"})
 SHAPE_KINDS = frozenset({"rect", "roundRect", "ellipse", "line"})
 CHART_KINDS = frozenset({"bar", "line", "area", "pie", "doughnut"})
 PAGE_LAYOUTS = frozenset(
@@ -268,8 +269,12 @@ IMAGE_ELEMENT_SCHEMA = _object_schema(
         },
         "fit": {
             "type": "string",
-            "enum": ["cover", "contain", "stretch"],
+            "enum": sorted(IMAGE_FITS),
             "default": "contain",
+            "description": (
+                "Preserve the source geometry. Use cover for crop-safe artwork "
+                "and contain for screenshots or evidence. Stretch is forbidden."
+            ),
         },
         "transparency": {
             "type": "number",
@@ -438,8 +443,12 @@ PAGE_CONTENT_SCHEMA = _object_schema(
         "image_alt": {"type": "string", "maxLength": 300},
         "image_fit": {
             "type": "string",
-            "enum": ["cover", "contain", "stretch"],
+            "enum": sorted(IMAGE_FITS),
             "default": "cover",
+            "description": (
+                "Preserve the source geometry. Match generated assets to the "
+                "physical slot ratio; stretch is forbidden."
+            ),
         },
         "bullets": {
             "type": "array",

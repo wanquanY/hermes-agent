@@ -43,10 +43,19 @@ class KimiProfile(ProviderProfile):
         base_url: str | None = None,
         api_mode: str | None = None,
     ) -> dict[str, Any]:
+        normalized_model = str(model or "").strip().lower()
         efforts = ["none", "enabled", "low", "medium", "high"]
         if api_mode == "anthropic_messages":
             efforts.extend(("max", "xhigh"))
         return {
+            # Vision is model-specific. Do not set the provider-wide
+            # ``supports_vision`` flag because legacy Moonshot text models share
+            # this profile; project K3 explicitly into the runtime descriptor.
+            "vision_enabled": normalized_model in {
+                "k3",
+                "kimi-k3",
+                "kimi-k3-cot",
+            },
             "reasoning_enabled": True,
             "reasoning_efforts": efforts,
             "default_reasoning_effort": "enabled",
@@ -127,6 +136,7 @@ kimi = KimiProfile(
     fixed_temperature=OMIT_TEMPERATURE,
     default_max_tokens=32000,
     default_headers={"User-Agent": "hermes-agent/1.0"},
+    supports_vision_tool_messages=True,
     default_aux_model="kimi-k2-turbo-preview",
 )
 
@@ -138,6 +148,7 @@ kimi_cn = KimiProfile(
     fixed_temperature=OMIT_TEMPERATURE,
     default_max_tokens=32000,
     default_headers={"User-Agent": "hermes-agent/1.0"},
+    supports_vision_tool_messages=True,
     default_aux_model="kimi-k2-turbo-preview",
 )
 

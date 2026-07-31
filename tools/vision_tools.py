@@ -719,14 +719,23 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
             return True
         return False
 
-    # Provider plugins own provider-wide wire capabilities. This keeps newly
-    # installed providers from requiring another hardcoded branch here.
+    # Provider plugins own provider-wide *wire* capabilities. Model vision
+    # support has already been established by ``decide_image_input_mode``;
+    # checking ``profile.supports_vision`` again here incorrectly conflates a
+    # per-model capability with whether the provider transport accepts image
+    # content in tool-result messages. Kimi is the concrete failure mode: K3
+    # is vision-capable, while the provider profile intentionally does not
+    # claim that every Kimi model is. Its Anthropic transport does support
+    # image blocks in tool results, so the current model must receive the
+    # pixels instead of being replaced by an auxiliary model's text summary.
     try:
         from providers import get_provider_profile
 
         profile = get_provider_profile(p)
-        if profile is not None and profile.supports_vision:
-            return True
+        if profile is not None:
+            return bool(
+                getattr(profile, "supports_vision_tool_messages", True)
+            )
     except Exception:
         pass
 
@@ -764,8 +773,9 @@ def _build_native_vision_tool_result(
     # has the user's original question in context; this just acknowledges
     # the image is now visible and reminds it what it was asked.
     text_part = (
-        "Image loaded into your context — you can see it natively now. "
-        "Use your built-in vision to answer the user."
+        "Image loaded as a normal multimodal input in this ongoing conversation. "
+        "Continue the current task with the full prior context and inspect the "
+        "pixels using your built-in vision."
     )
     if isinstance(question, str) and question.strip():
         text_part += f"\n\nQuestion: {question.strip()}"
@@ -1283,7 +1293,12 @@ VISION_ANALYZE_SCHEMA = {
             },
             "question": {
                 "type": "string",
-                "description": "Your specific question or request about the image. Optional context the model uses on the next turn after seeing the image."
+                "description": (
+                    "The concrete, context-aware purpose for reading this image. "
+                    "Reference the current task, expected result, and exact visual "
+                    "risk to inspect; the active model receives this question with "
+                    "the image while retaining the full conversation history."
+                )
             }
         },
         "required": ["image_url", "question"]

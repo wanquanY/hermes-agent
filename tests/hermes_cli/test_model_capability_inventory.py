@@ -95,6 +95,23 @@ def test_opencode_go_capabilities_match_family_adapter():
     assert unsupported == {}
 
 
+def test_kimi_k3_projects_native_vision_without_claiming_all_kimi_models():
+    profile = get_provider_profile("kimi-coding")
+
+    k3 = profile.model_capabilities(
+        "kimi-k3",
+        api_mode="anthropic_messages",
+    )
+    legacy = profile.model_capabilities(
+        "kimi-k2-turbo-preview",
+        api_mode="chat_completions",
+    )
+
+    assert k3["vision_enabled"] is True
+    assert legacy["vision_enabled"] is False
+    assert profile.supports_vision_tool_messages is True
+
+
 def test_xai_only_exposes_effort_when_transport_accepts_it():
     profile = get_provider_profile("xai")
 
