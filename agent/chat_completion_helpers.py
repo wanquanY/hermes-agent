@@ -566,13 +566,13 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
-    from agent.tool_capability_projection import project_tools_for_model
-
-    tools_for_api = project_tools_for_model(
-        agent.tools,
-        supports_native_vision=agent._model_supports_vision(),
-        image_input_mode=getattr(agent, "_image_input_mode", "auto"),
-    )
+    # Tool authorization and model input routing are independent concerns.
+    # Keep the canonical image-ingest tool visible even when the active model
+    # supports native image inputs: user-message attachments are already
+    # available at request start, but images returned by tools (for example
+    # rendered presentation pages) still need ``vision_analyze`` to attach
+    # their pixels to the ongoing conversation.
+    tools_for_api = agent.tools
 
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()

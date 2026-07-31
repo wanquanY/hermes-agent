@@ -438,7 +438,7 @@ class TestErrorLoggingExcInfo:
                 "tools.vision_tools._image_to_base64_data_url",
                 return_value="data:image/jpeg;base64,abc",
             ),
-            caplog.at_level(logging.WARNING, logger="tools.vision_tools"),
+            caplog.at_level(logging.WARNING),
         ):
             # Mock the async_call_llm function to return a mock response
             mock_response = MagicMock()
@@ -540,7 +540,7 @@ class TestVisionSafetyGuards:
             result = json.loads(await vision_analyze_tool(str(secret), "extract text"))
 
         assert result["success"] is False
-        assert "Only real image files are supported" in result["error"]
+        assert "source is not a recognized image" in result["error"]
         mock_llm.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -553,7 +553,8 @@ class TestVisionSafetyGuards:
         }
 
         with (
-            patch("tools.vision_tools.check_website_access", return_value=blocked),
+            patch("tools.url_safety.is_safe_url", return_value=True),
+            patch("tools.website_policy.check_website_access", return_value=blocked),
             patch("tools.vision_tools._validate_image_url", return_value=True),
             patch("tools.vision_tools._download_image", new_callable=AsyncMock) as mock_download,
         ):
@@ -633,6 +634,22 @@ class TestVisionRequirements:
 # ---------------------------------------------------------------------------
 # Integration: registry entry
 # ---------------------------------------------------------------------------
+
+
+class TestVisionRegistryAvailability:
+    def test_native_vision_tool_is_not_gated_on_auxiliary_client(self):
+        """Per-turn native vision must stay available without an aux backend."""
+        from tools.registry import registry
+
+        with patch(
+            "agent.auxiliary_client.resolve_vision_provider_client",
+            return_value=("auto", None, None),
+        ):
+            definitions = registry.get_definitions({"vision_analyze"}, quiet=True)
+
+        assert [item["function"]["name"] for item in definitions] == [
+            "vision_analyze"
+        ]
 
 
 # ---------------------------------------------------------------------------

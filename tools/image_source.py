@@ -28,11 +28,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Raw-bytes INGEST budget — what the resolver will load before handing off.
 # This is deliberately the 50MB download cap (tools/vision_tools._VISION_MAX_DOWNLOAD_BYTES),
@@ -195,7 +198,17 @@ async def _download_to_bytes(url: str) -> bytes:
     except PermissionError as exc:  # website policy block
         raise SourceUnsafe(str(exc), src=url, origin="http")
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            # Cleanup failure must not discard image bytes that were already
+            # downloaded and validated. Keep it observable without turning a
+            # best-effort temp-file deletion into a failed vision request.
+            logger.warning(
+                "Could not delete temporary image download %s",
+                tmp,
+                exc_info=True,
+            )
 
 
 def _is_local_terminal_backend() -> bool:

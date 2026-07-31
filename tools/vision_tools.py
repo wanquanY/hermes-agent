@@ -2,9 +2,9 @@
 """
 Vision Tools Module
 
-This module provides vision analysis tools that work with image URLs.
-Uses the centralized auxiliary vision router, which can select OpenRouter,
-Nous, Codex, native Anthropic, or a custom OpenAI-compatible endpoint.
+This module provides vision analysis tools for URLs and local image paths.
+Vision-capable active models receive the pixels directly in their ongoing
+conversation; non-vision models use the centralized auxiliary vision router.
 
 Available tools:
 - vision_analyze_tool: Analyze images from URLs with custom prompts
@@ -1368,7 +1368,14 @@ registry.register(
     toolset="vision",
     schema=VISION_ANALYZE_SCHEMA,
     handler=_handle_vision_analyze,
-    check_fn=check_vision_requirements,
+    # Do not gate this tool on the auxiliary vision client. Native vision is a
+    # per-turn capability supplied by the active agent/model descriptor, while
+    # registry availability checks run without that context. The old static
+    # check therefore hid vision_analyze from Kimi K3 and other native-vision
+    # models whenever no auxiliary backend was configured. Keep the canonical
+    # image-ingest tool visible and let the handler choose the native or
+    # auxiliary route with the actual turn context.
+    check_fn=None,
     is_async=True,
     emoji="👁️",
 )

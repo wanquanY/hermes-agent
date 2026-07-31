@@ -80,7 +80,7 @@ def _build_copilot_agent(monkeypatch, *, model="gpt-5.4"):
     return agent
 
 
-def test_codex_responses_hides_vision_fallback_tool_for_native_vision_model(
+def test_codex_responses_keeps_canonical_image_ingest_tool_for_native_vision_model(
     monkeypatch,
 ):
     agent = _build_agent(monkeypatch)
@@ -112,7 +112,10 @@ def test_codex_responses_hides_vision_fallback_tool_for_native_vision_model(
         [{"role": "user", "content": "Describe the attached image."}]
     )
 
-    assert {tool["name"] for tool in kwargs["tools"]} == {"terminal"}
+    assert {tool["name"] for tool in kwargs["tools"]} == {
+        "terminal",
+        "vision_analyze",
+    }
     assert {
         tool["function"]["name"] for tool in agent.tools
     } == {"terminal", "vision_analyze"}

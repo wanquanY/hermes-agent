@@ -756,10 +756,19 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # Block binary files by extension (no I/O).
         if has_binary_extension(str(_resolved)):
             _ext = _resolved.suffix.lower()
+            if _ext in {
+                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+                ".tif", ".tiff", ".heic", ".svg",
+            }:
+                return json.dumps({
+                    "error": (
+                        f"'{path}' is an image, not a text file. "
+                        "Load its pixels with vision_analyze using this path."
+                    ),
+                })
             return json.dumps({
                 "error": (
-                    f"Cannot read binary file '{path}' ({_ext}). "
-                    "Use vision_analyze for images, or terminal to inspect binary files."
+                    f"Cannot read binary file '{path}' ({_ext}) as text."
                 ),
             })
 
@@ -1341,7 +1350,7 @@ def _check_file_reqs():
 
 READ_FILE_SCHEMA = {
     "name": "read_file",
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. NOTE: Cannot read images or binary files — use vision_analyze for images.",
+    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. For an image path, call vision_analyze so the active model receives the pixels.",
     "parameters": {
         "type": "object",
         "properties": {

@@ -67,6 +67,24 @@ class TestReadFileHandler:
         assert "error" in result
         assert "terminal not available" in result["error"]
 
+    @patch("tools.file_tools._resolve_path_for_task")
+    def test_image_path_points_to_visual_ingest_without_browser_or_terminal(
+        self,
+        mock_resolve,
+        tmp_path,
+    ):
+        image_path = tmp_path / "slide.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        mock_resolve.return_value = image_path
+
+        from tools.file_tools import read_file_tool
+
+        result = json.loads(read_file_tool(str(image_path)))
+
+        assert "vision_analyze" in result["error"]
+        assert "browser" not in result["error"].lower()
+        assert "terminal" not in result["error"].lower()
+
 
 class TestWriteFileHandler:
     @patch("tools.file_tools._get_file_ops")

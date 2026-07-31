@@ -1372,7 +1372,7 @@ class TestBuildApiKwargs:
         assert kwargs["messages"] is messages
         assert kwargs["timeout"] == 1800.0
 
-    def test_native_vision_model_does_not_receive_vision_fallback_tool(self, agent):
+    def test_native_vision_model_keeps_canonical_image_ingest_tool(self, agent):
         agent.tools = _make_tool_defs("web_search", "vision_analyze")
         agent.model_descriptor = {"vision_enabled": True}
         agent._image_input_mode = "auto"
@@ -1381,7 +1381,7 @@ class TestBuildApiKwargs:
 
         assert {
             tool["function"]["name"] for tool in kwargs["tools"]
-        } == {"web_search"}
+        } == {"web_search", "vision_analyze"}
         assert {
             tool["function"]["name"] for tool in agent.tools
         } == {"web_search", "vision_analyze"}
