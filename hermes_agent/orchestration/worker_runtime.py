@@ -377,7 +377,7 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
         return await _dispatch_runtime_ensure(req, transport, params)
     if method == "runtime.cloud_proxy.update":
         return await _dispatch_runtime_cloud_proxy_update(req, transport, params)
-    if method == "reload.mcp":
+    if method in {"reload.mcp", "skills.reload"}:
         return await _dispatch_profile_capability_reload(req, transport, params)
     if method == "run.cancel":
         return await _dispatch_run_cancel(req, transport, params)
@@ -426,9 +426,24 @@ async def _dispatch_profile_capability_reload(
         return False
 
     rid = req.get("id")
+    method = str(req.get("method") or "").strip()
     started = time.perf_counter()
     pool = worker_pool()
+    local_skill_reload: dict[str, Any] = {}
     try:
+        if method == "skills.reload":
+            from tui_gateway.methods.integrations import reload_skill_runtime_state
+            from tui_gateway.services.profile_context import (
+                enter_profile_context,
+                leave_profile_context,
+                profile_context_for_params,
+            )
+
+            profile_token = enter_profile_context(profile_context_for_params(params))
+            try:
+                local_skill_reload = reload_skill_runtime_state()
+            finally:
+                leave_profile_context(profile_token)
         invalidation = await pool.invalidate_capability_scope(
             scope.runtime_scope_key,
         )
@@ -461,6 +476,7 @@ async def _dispatch_profile_capability_reload(
         "retired_warm_workers": invalidation["retired_warm_workers"],
         "retired_idle_workers": invalidation["retired_idle_workers"],
         "deferred_active_workers": invalidation["deferred_active_workers"],
+        **({"skill_runtime": local_skill_reload} if local_skill_reload else {}),
         "worker": {
             "pid": worker.process.pid if worker.process else None,
             "bootstrap_ms": worker.bootstrap_ms,

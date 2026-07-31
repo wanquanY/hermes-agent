@@ -2290,6 +2290,46 @@ def test_skills_list_realigns_cached_skill_modules_to_dovie_profile_home(server,
     assert resp["result"]["items"][0]["install_path"] == "productivity/draft-skill"
 
 
+def test_skills_inspect_reads_installed_package_without_market_resolution(server, tmp_path):
+    profile_home = tmp_path / "profile-home"
+    inspect_installed_skill = MagicMock(return_value={
+        "name": "frontis-vi",
+        "description": "Brand rules",
+        "source": "local",
+        "source_type": "local",
+        "category": "uncategorized",
+        "files": [{
+            "path": "SKILL.md",
+            "content": "# Frontis",
+            "truncated": False,
+            "is_binary": False,
+            "size": 9,
+        }],
+    })
+    fake_lifecycle = types.SimpleNamespace(
+        inspect_installed_skill=inspect_installed_skill
+    )
+
+    with patch.dict(sys.modules, {"tools.skill_package_lifecycle": fake_lifecycle}):
+        resp = server.handle_request({
+            "id": "skills-inspect-local",
+            "method": "skills.inspect",
+            "params": {
+                "query": "frontis-vi",
+                "install_path": "frontis-vi",
+                "dovie_profile": {
+                    "hermesHomePath": str(profile_home),
+                    "runtimeScopeKey": "profile:default",
+                },
+            },
+        })
+
+    assert "error" not in resp
+    assert resp["result"]["info"]["name"] == "frontis-vi"
+    assert resp["result"]["info"]["files"][0]["path"] == "SKILL.md"
+    inspect_installed_skill.assert_called_once_with("frontis-vi", "frontis-vi")
+
+
 def test_skills_manage_uninstall_uses_hub_lifecycle(server):
     uninstall = MagicMock(return_value=(True, "Uninstalled 'showroom'"))
     fake_hub = types.SimpleNamespace(uninstall_skill=uninstall)

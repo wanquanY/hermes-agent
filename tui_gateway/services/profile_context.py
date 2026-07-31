@@ -16,6 +16,21 @@ _active_profile_context: contextvars.ContextVar[dict | None] = contextvars.Conte
 )
 
 
+def _string_list(*candidates: Any) -> list[str]:
+    for candidate in candidates:
+        if not isinstance(candidate, list):
+            continue
+        values: list[str] = []
+        seen: set[str] = set()
+        for raw in candidate:
+            value = str(raw or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+        return values
+    return []
+
+
 def profile_context_for_params(params: dict | None = None) -> dict | None:
     params = params or {}
     profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
@@ -102,6 +117,13 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
         or profile.get("modelProvider")
         or ""
     ).strip()
+    recommended_skills = _string_list(
+        params.get("recommended_skills"),
+        params.get("recommendedSkills"),
+        profile.get("recommended_skills"),
+        profile.get("recommendedSkills"),
+        profile.get("skills"),
+    )
     if not any((profile_id, version_id, draft_id, hermes_home, runtime_scope_key, runtime_executor, codex_home)):
         return None
     if not runtime_scope_key:
@@ -120,6 +142,7 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
         "codex_account_mode": codex_account_mode,
         "codex_extra_env": codex_extra_env,
         "provider": provider,
+        "recommended_skills": recommended_skills,
     }
 
 

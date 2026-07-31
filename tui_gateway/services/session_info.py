@@ -118,6 +118,7 @@ def session_info(agent: Any, session: dict | None = None) -> dict:
         "fast": service_tier == "priority",
         "tools": {},
         "skills": {},
+        "active_skills": list(getattr(agent, "preloaded_skills", []) or []),
         "cwd": cwd,
         "branch": str((session or {}).get("git_branch") or ""),
         "project": (session or {}).get("project"),

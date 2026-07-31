@@ -10,6 +10,175 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+_INSPECT_MAX_FILES = 200
+_INSPECT_MAX_FILE_BYTES = 96_000
+_INSPECT_EXCLUDED_DIRS = frozenset(
+    {
+        ".git",
+        ".hub",
+        ".venv",
+        "venv",
+        "node_modules",
+        "site-packages",
+        "__pycache__",
+    }
+)
+
+
+def _skill_detail_file(path: Path, skill_dir: Path) -> dict[str, Any] | None:
+    if path.is_symlink() or any(part in _INSPECT_EXCLUDED_DIRS for part in path.parts):
+        return None
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(skill_dir)
+        content = resolved.read_bytes()
+    except (OSError, ValueError):
+        return None
+
+    truncated = len(content) > _INSPECT_MAX_FILE_BYTES
+    preview = content[:_INSPECT_MAX_FILE_BYTES]
+    try:
+        text = preview.decode("utf-8")
+        is_binary = False
+    except UnicodeDecodeError:
+        text = f"[Binary file: {path.relative_to(skill_dir).as_posix()}, size: {len(content)} bytes]"
+        is_binary = True
+        truncated = False
+    return {
+        "path": path.relative_to(skill_dir).as_posix(),
+        "content": text,
+        "truncated": truncated,
+        "is_binary": is_binary,
+        "size": len(content),
+    }
+
+
+def _direct_local_skill_record(
+    skill_name: str,
+    install_path: str,
+    skills_root: Path,
+) -> dict[str, Any] | None:
+    relative_candidates = [
+        str(install_path or "").strip(),
+        skill_name.replace(":", "/", 1),
+    ]
+    for raw_relative in relative_candidates:
+        if not raw_relative:
+            continue
+        relative = Path(raw_relative)
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        skill_dir = (skills_root / relative).resolve()
+        try:
+            skill_dir.relative_to(skills_root)
+        except ValueError:
+            continue
+        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
+            continue
+        parts = skill_dir.relative_to(skills_root).parts
+        return {
+            "name": skill_name,
+            "description": "",
+            "category": "/".join(parts[:-1]) or None,
+            "skill_dir": str(skill_dir),
+        }
+    return None
+
+
+def inspect_installed_skill(
+    skill_name: str,
+    install_path: str = "",
+) -> dict[str, Any]:
+    """Return local skill metadata and bounded package-file previews.
+
+    Unlike the Skills Hub inspection path, this function resolves the skill
+    through the same local index used by ``skills.list`` and never contacts a
+    remote registry. Reading the package directly also keeps inspection free
+    from skill activation, environment capture, and disabled-skill checks.
+    """
+
+    normalized_name = str(skill_name or "").strip()
+    if not normalized_name:
+        raise RuntimeError("skill_name is required")
+
+    from tools.skills_tool import (
+        SKILLS_DIR,
+        _find_all_skills,
+        _parse_frontmatter,
+        _parse_tags,
+    )
+
+    skills_root = Path(SKILLS_DIR).expanduser().resolve()
+    installed = _direct_local_skill_record(
+        normalized_name,
+        install_path,
+        skills_root,
+    )
+    if installed is None:
+        installed = next(
+            (
+                item
+                for item in _find_all_skills(skip_disabled=True)
+                if str(item.get("name") or "").strip() == normalized_name
+            ),
+            None,
+        )
+    if installed is None:
+        raise RuntimeError(f"skill not found in local index: {normalized_name}")
+
+    skill_dir = Path(str(installed.get("skill_dir") or "")).expanduser().resolve()
+    if not skill_dir.is_dir():
+        raise RuntimeError(f"skill package directory not found: {skill_dir}")
+    skill_md = skill_dir / "SKILL.md"
+    try:
+        if skill_md.is_symlink():
+            raise RuntimeError("SKILL.md symlinks are not supported")
+        skill_md.resolve().relative_to(skill_dir)
+        skill_content = skill_md.read_text(encoding="utf-8")
+        frontmatter, _body = _parse_frontmatter(skill_content)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"failed to read local skill package: {exc}") from exc
+
+    candidates = sorted(
+        (
+            path
+            for path in skill_dir.rglob("*")
+            if path.is_file()
+        ),
+        key=lambda path: (
+            path.relative_to(skill_dir).as_posix() != "SKILL.md",
+            path.relative_to(skill_dir).as_posix(),
+        ),
+    )
+    files = []
+    for path in candidates:
+        detail = _skill_detail_file(path, skill_dir)
+        if detail is None:
+            continue
+        files.append(detail)
+        if len(files) >= _INSPECT_MAX_FILES:
+            break
+
+    metadata = frontmatter.get("metadata")
+    hermes_metadata = metadata.get("hermes", {}) if isinstance(metadata, dict) else {}
+    tags = _parse_tags(hermes_metadata.get("tags") or frontmatter.get("tags", ""))
+    plugin_name = str(installed.get("plugin") or "").strip()
+    return {
+        "name": str(frontmatter.get("name") or installed.get("name") or normalized_name),
+        "description": str(
+            frontmatter.get("description") or installed.get("description") or ""
+        ),
+        "source": plugin_name or "local",
+        "source_type": "plugin" if plugin_name else "local",
+        "identifier": normalized_name if plugin_name else "",
+        "category": str(installed.get("category") or "uncategorized"),
+        "tags": tags,
+        "skill_md_preview": skill_content,
+        "files": files,
+        "files_truncated": len(candidates) > len(files),
+        "skill_dir": str(skill_dir),
+    }
+
 
 def _safe_relative_skill_dir(loaded_skill: dict[str, Any], skill_name: str) -> Path:
     raw_path = str(loaded_skill.get("path") or "").strip()

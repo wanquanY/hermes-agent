@@ -336,6 +336,38 @@ def _parse_tui_skills_env() -> list[str]:
     return skills
 
 
+def _profile_recommended_skills(profile_context: dict | None) -> list[str]:
+    if not isinstance(profile_context, dict):
+        return []
+    raw = (
+        profile_context.get("recommended_skills")
+        or profile_context.get("recommendedSkills")
+        or []
+    )
+    if not isinstance(raw, list):
+        return []
+    skills: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        name = str(item or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            skills.append(name)
+    return skills
+
+
+def _startup_skill_names(profile_context: dict | None) -> list[str]:
+    """Merge profile-owned skill bindings with the explicit CLI override."""
+
+    skills: list[str] = []
+    seen: set[str] = set()
+    for name in [*_profile_recommended_skills(profile_context), *_parse_tui_skills_env()]:
+        if name not in seen:
+            seen.add(name)
+            skills.append(name)
+    return skills
+
+
 def _background_agent_kwargs(agent, task_id: str) -> dict:
     cfg = _server._load_cfg()
 
@@ -546,17 +578,53 @@ def _make_agent(
     from tui_gateway.services.runtime_credentials import remember_requested_runtime_provider
     from tui_gateway.services.toolset_scope import resolve_session_toolsets
 
+    session_context = dict(_sessions.get(sid) or {})
+    _profile_context = (
+        profile_context
+        if isinstance(profile_context, dict)
+        else session_context.get("profile_context")
+    )
+    if not isinstance(_profile_context, dict):
+        try:
+            from tui_gateway.services.profile_context import active_profile_context
+
+            _profile_context = active_profile_context()
+        except Exception:
+            _profile_context = None
+    _profile_context = _profile_context if isinstance(_profile_context, dict) else {}
+
     cfg = _server._load_cfg()
     agent_cfg = cfg.get("agent") or {}
     system_prompt = (agent_cfg.get("system_prompt", "") or "").strip()
-    startup_skills = _parse_tui_skills_env()
+    startup_skills = _startup_skill_names(_profile_context)
+    loaded_skills: list[str] = []
+    missing_skills: list[str] = []
     if startup_skills:
         from agent.skill_commands import build_preloaded_skills_prompt
 
-        skills_prompt, _loaded_skills, missing_skills = build_preloaded_skills_prompt(
+        skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(
             startup_skills,
             task_id=session_id or key,
         )
+        try:
+            from agent.dovie_diagnostics import emit_dovie_diagnostic
+
+            emit_dovie_diagnostic(
+                "[profile-skill-binding]",
+                {
+                    "stage": "agent-build",
+                    "agent_profile_id": str(_profile_context.get("id") or ""),
+                    "runtime_scope_key": str(
+                        _profile_context.get("runtime_scope_key") or ""
+                    ),
+                    "requested_skills": startup_skills,
+                    "loaded_skills": loaded_skills,
+                    "missing_skills": missing_skills,
+                    "session_id": str(session_id or key),
+                },
+            )
+        except Exception:
+            logger.debug("profile skill binding diagnostic failed", exc_info=True)
         if missing_skills:
             raise ValueError(f"Unknown skill(s): {', '.join(missing_skills)}")
         if skills_prompt:
@@ -577,7 +645,6 @@ def _make_agent(
     # override (composer pick shipped on session.create).
     _override = model_override if isinstance(model_override, dict) else (_sessions.get(sid) or {}).get("model_override")
     _override = _override if isinstance(_override, dict) else None
-    session_context = dict(_sessions.get(sid) or {})
     session_model_descriptor = session_context.get("model_descriptor")
     descriptor_context_window = (
         session_model_descriptor.get("context_window")
@@ -590,20 +657,6 @@ def _make_agent(
         and descriptor_context_window > 0
     ):
         descriptor_context_window = None
-    _profile_context = (
-        profile_context
-        if isinstance(profile_context, dict)
-        else session_context.get("profile_context")
-    )
-    if not isinstance(_profile_context, dict):
-        try:
-            from tui_gateway.services.profile_context import active_profile_context
-
-            _profile_context = active_profile_context()
-        except Exception:
-            _profile_context = None
-    _profile_context = _profile_context if isinstance(_profile_context, dict) else {}
-
     def _first_text(*values) -> str:
         for value in values:
             text = str(value or "").strip()
@@ -853,6 +906,7 @@ def _make_agent(
     )
     if cwd:
         agent.session_cwd = cwd
+    agent.preloaded_skills = list(loaded_skills)
     if runtime.get("codex_home") is not None:
         agent.codex_home = runtime.get("codex_home")
     if _codex_extra_env:

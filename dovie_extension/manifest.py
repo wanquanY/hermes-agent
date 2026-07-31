@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
-CONTRACT_VERSION = "2026-07-29"
-EXTENSION_VERSION = "2026-07-29"
+CONTRACT_VERSION = "2026-07-31"
+EXTENSION_VERSION = "2026-07-31"
 
 REQUIRED_METHODS = [
     "gateway.capabilities",
@@ -130,6 +130,7 @@ REQUIRED_METHODS = [
     "secret.respond",
     "clarify.respond",
     "cron.manage",
+    "skills.inspect",
     "skills.manage",
     "dovie.capabilities.reconcile",
     "dovie.capabilities.plugin.status",
@@ -260,6 +261,7 @@ REQUIRED_GATEWAY_METHODS = {
     "events.compact",
     "subagent.runs.list",
     "subagent.events.list",
+    "skills.inspect",
     "skills.list",
     "skills.reload",
     "dovie.capabilities.reconcile",
@@ -406,6 +408,7 @@ REQUIRED_GATEWAY_METHODS = {
     "secret.respond",
     "clarify.respond",
     "cron.manage",
+    "skills.inspect",
     "skills.manage",
     "toolsets.list",
     "profile.prepare_runtime",

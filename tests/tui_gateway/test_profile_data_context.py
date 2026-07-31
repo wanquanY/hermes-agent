@@ -64,6 +64,7 @@ def test_profile_context_extracts_codex_mode_and_extra_env_from_contract_fields(
         },
         "dovie_profile": {
             "hermesHomePath": str(profile_home),
+            "recommendedSkills": ["frontis-vi", "frontis-vi", " research "],
         },
     })
 
@@ -75,6 +76,7 @@ def test_profile_context_extracts_codex_mode_and_extra_env_from_contract_fields(
         "CODEX_TRACE": "1",
         "42": "True",
     }
+    assert ctx["recommended_skills"] == ["frontis-vi", "research"]
 
 
 def test_profile_context_extracts_nested_codex_camel_and_snake_fields(tmp_path):

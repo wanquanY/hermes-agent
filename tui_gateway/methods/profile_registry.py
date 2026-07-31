@@ -327,7 +327,29 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes profile registry db unavailable")
     try:
-        profile = db.profiles.upsert_agent_profile(**_profile_payload(params or {}))
+        payload = _profile_payload(params or {})
+        previous = db.profiles.get_agent_profile(payload["profile_id"])
+        profile = db.profiles.upsert_agent_profile(**payload)
+        previous_skills = _string_array(
+            (previous or {}).get("recommended_skills")
+            or (previous or {}).get("recommendedSkills")
+        )
+        persisted_skills = _string_array(
+            profile.get("recommended_skills")
+            or profile.get("recommendedSkills")
+        )
+        if previous_skills or payload["recommended_skills"] or persisted_skills:
+            emit_dovie_diagnostic(
+                "[profile-skill-binding]",
+                {
+                    "stage": "profile-upsert",
+                    "agent_profile_id": payload["profile_id"],
+                    "hermes_home_path": payload["hermes_home_path"],
+                    "previous_skills": previous_skills,
+                    "requested_skills": payload["recommended_skills"],
+                    "persisted_skills": persisted_skills,
+                },
+            )
         return _ok(rid, {"profile": profile})
     except ValueError as exc:
         return _err(rid, 4006, str(exc))

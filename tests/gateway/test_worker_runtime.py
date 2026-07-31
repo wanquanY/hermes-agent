@@ -427,6 +427,72 @@ async def test_profile_mcp_reload_rebuilds_scoped_worker_generation(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_profile_skill_reload_refreshes_control_and_worker_runtimes(monkeypatch) -> None:
+    from tui_gateway.methods import integrations
+
+    transport = _RecordingTransport()
+    scope = RuntimeScope(
+        agent_profile_id="test",
+        runtime_scope_key="profile:test",
+        hermes_home="/tmp/test-hermes-home",
+    )
+    worker = _fake_worker(scope)
+    calls: list[tuple[str, object]] = []
+
+    class _FakePool:
+        async def invalidate_capability_scope(self, scope_key):
+            calls.append(("invalidate", scope_key))
+            return {
+                "generation": 4,
+                "retired_warm_workers": 0,
+                "retired_idle_workers": 1,
+                "deferred_active_workers": 0,
+            }
+
+        async def ensure_warm(self, profile_context, *, scope_key=None):
+            calls.append(("warm", (scope_key, profile_context["agent_profile_id"])))
+            return worker
+
+    monkeypatch.setattr(worker_runtime, "worker_pool", lambda: _FakePool())
+    monkeypatch.setattr(
+        integrations,
+        "reload_skill_runtime_state",
+        lambda: {
+            "result": {"added": [{"name": "frontis-vi"}], "removed": [], "total": 1},
+            "invalidated_prompt_sessions": 1,
+        },
+    )
+
+    handled = await worker_runtime.primary_dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": "skills-reload-1",
+            "method": "skills.reload",
+            "params": {
+                "confirm": True,
+                "agent_profile_id": "test",
+                "runtime_scope_key": "profile:test",
+                "dovie_profile": {
+                    "id": "test",
+                    "runtimeScopeKey": "profile:test",
+                    "hermesHomePath": "/tmp/test-hermes-home",
+                },
+            },
+        },
+        transport,
+    )
+
+    assert handled is True
+    assert calls == [
+        ("invalidate", "profile:test"),
+        ("warm", ("profile:test", "test")),
+    ]
+    result = transport.written[0]["result"]
+    assert result["runtime_generation"] == 4
+    assert result["skill_runtime"]["result"]["added"] == [{"name": "frontis-vi"}]
+
+
+@pytest.mark.asyncio
 async def test_unconfirmed_profile_mcp_reload_uses_confirmation_handler() -> None:
     transport = _RecordingTransport()
     handled = await worker_runtime.primary_dispatch(

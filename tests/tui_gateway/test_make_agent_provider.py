@@ -9,6 +9,60 @@ import os
 from unittest.mock import MagicMock, patch
 
 
+def test_make_agent_preloads_profile_bound_skills():
+    fake_runtime = {
+        "provider": "anthropic",
+        "base_url": "https://api.anthropic.com",
+        "api_key": "sk-test-key",
+        "api_mode": "anthropic_messages",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {
+        "model": {"default": "claude-opus-4-6", "provider": "anthropic"},
+        "agent": {"system_prompt": "base prompt"},
+    }
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value=fake_runtime,
+        ),
+        patch(
+            "agent.skill_commands.build_preloaded_skills_prompt",
+            return_value=("frontis profile prompt", ["frontis-vi"], []),
+        ) as build_skills,
+        patch("run_agent.AIAgent") as make_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        agent = _make_agent(
+            "sid-profile-skills",
+            "key-profile-skills",
+            profile_context={
+                "id": "agent-default",
+                "runtime_scope_key": "profile:agent-default",
+                "recommended_skills": ["frontis-vi"],
+            },
+        )
+
+    build_skills.assert_called_once_with(
+        ["frontis-vi"],
+        task_id="key-profile-skills",
+    )
+    assert make_agent.call_args.kwargs["ephemeral_system_prompt"] == (
+        "base prompt\n\nfrontis profile prompt"
+    )
+    assert agent.preloaded_skills == ["frontis-vi"]
+
+
 def test_make_agent_passes_resolved_provider():
     """_make_agent forwards provider/base_url/api_key/api_mode from
     resolve_runtime_provider to AIAgent."""

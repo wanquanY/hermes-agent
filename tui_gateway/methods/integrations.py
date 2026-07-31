@@ -1,9 +1,12 @@
 # ruff: noqa: F401,F403,F405,F821,ARG001
 from __future__ import annotations
 
+import threading
+
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
+_SKILL_HOME_LOCK = threading.RLock()
 
 
 # ── Methods: browser / plugins / cron / skills ───────────────────────
@@ -1709,23 +1712,48 @@ def _check_skill_requirements(name: str, session_id: str = "") -> dict:
 @method("skills.list")
 def _(rid, params: dict) -> dict:
     try:
-        return _ok(
-            rid,
-            _list_installed_skill_records(
-                source_filter=str(params.get("source") or "all"),
-                enabled_only=bool(params.get("enabled_only")),
-                platform=params.get("platform") or None,
-            ),
-        )
+        with _SKILL_HOME_LOCK:
+            return _ok(
+                rid,
+                _list_installed_skill_records(
+                    source_filter=str(params.get("source") or "all"),
+                    enabled_only=bool(params.get("enabled_only")),
+                    platform=params.get("platform") or None,
+                ),
+            )
     except Exception as exc:
         return _err(rid, 4020, f"skills.list failed: {exc}")
+
+
+@method("skills.inspect")
+def _(rid, params: dict) -> dict:
+    query = _skill_query(params)
+    try:
+        with _SKILL_HOME_LOCK:
+            _sync_skill_module_paths_to_active_home()
+            from tools.skill_package_lifecycle import inspect_installed_skill
+
+            return _ok(
+                rid,
+                {
+                    "info": inspect_installed_skill(
+                        query,
+                        str(params.get("install_path") or ""),
+                    )
+                },
+            )
+    except Exception as exc:
+        return _err(rid, 4026, f"skills.inspect failed: {exc}")
 
 
 @method("skills.manage")
 def _(rid, params: dict) -> dict:
     action = params.get("action", "list")
     query = _skill_query(params)
+    lock_acquired = False
     try:
+        _SKILL_HOME_LOCK.acquire()
+        lock_acquired = True
         _sync_skill_module_paths_to_active_home()
 
         if action == "list":
@@ -1914,11 +1942,15 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4017, f"unknown skills action: {action}")
     except Exception as e:
         return _err(rid, 5024, str(e))
+    finally:
+        if lock_acquired:
+            _SKILL_HOME_LOCK.release()
 
 
-@method("skills.reload")
-def _(rid, params: dict) -> dict:
-    try:
+def reload_skill_runtime_state() -> dict:
+    """Reload this process's skill registries for the active profile home."""
+
+    with _SKILL_HOME_LOCK:
         _sync_skill_module_paths_to_active_home()
         _clear_skill_prompt_cache()
 
@@ -1940,13 +1972,16 @@ def _(rid, params: dict) -> dict:
             lines.append("Removed skills:")
             lines.extend(f"  - {item.get('name', '')}" for item in removed)
         lines.append(f"{total} skill(s) available")
-        return _ok(
-            rid,
-            {
-                "output": "\n".join(lines),
-                "result": result,
-                "invalidated_prompt_sessions": invalidated_prompt_sessions,
-            },
-        )
+        return {
+            "output": "\n".join(lines),
+            "result": result,
+            "invalidated_prompt_sessions": invalidated_prompt_sessions,
+        }
+
+
+@method("skills.reload")
+def _(rid, params: dict) -> dict:
+    try:
+        return _ok(rid, reload_skill_runtime_state())
     except Exception as e:
         return _err(rid, 5025, str(e))
