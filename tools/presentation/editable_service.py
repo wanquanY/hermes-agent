@@ -747,21 +747,34 @@ def build_editable_presentation(
         {
             "output_path": str(destination),
             "overwrite": bool(args.get("overwrite", False)),
+            "render_preview": args.get("render_preview", True) is not False,
+            "asset_root": str(root),
             "spec": spec,
         },
         interrupted=interrupted_fn,
         timeout_seconds=timeout_seconds,
     )
-    preview = (
-        _render_previews(destination, interrupted=interrupted_fn)
-        if args.get("render_preview", True) is not False
-        else {
+    if args.get("render_preview", True) is False:
+        preview = {
             "status": "skipped",
             "reason": "render_preview=false",
             "pdf_path": None,
             "page_images": [],
         }
-    )
+    else:
+        renderer_preview = result.get("preview")
+        preview = (
+            renderer_preview
+            if isinstance(renderer_preview, dict)
+            else {
+                "status": "unavailable",
+                "reason": (
+                    "Dovie Artifact Runtime did not return native page previews"
+                ),
+                "pdf_path": None,
+                "page_images": [],
+            }
+        )
     diagnostics = result.get("diagnostics")
     diagnostic_pages = diagnostics if isinstance(diagnostics, list) else []
     issue_count = sum(
@@ -787,11 +800,11 @@ def build_editable_presentation(
         "visual_status": visual_status,
         "issue_count": issue_count,
         "requirements": (
-            "Repair every structural issue, load every rendered page with "
-            "vision_analyze at readable size, and rebuild until clean. A "
-            "vision-capable current authoring model must inspect the raw pixels "
-            "itself; auxiliary vision analysis is the fallback only for a "
-            "non-vision current model."
+            "Repair every structural issue, attach every rendered page image "
+            "as a native multimodal input at readable size, and rebuild until "
+            "clean. A vision-capable current authoring model must inspect the "
+            "raw pixels itself; auxiliary vision analysis is the fallback only "
+            "for a non-vision current model."
         ),
     }
     return {

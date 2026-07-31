@@ -82,6 +82,13 @@ def _write_fake_renderer(path: Path) -> None:
                 "output.write_bytes(b'fake-pptx')",
                 "spec_path = output.with_suffix('.slidespec.json')",
                 "spec_path.write_text(json.dumps(payload['spec']), encoding='utf-8')",
+                "preview = {'status': 'skipped', 'reason': 'render_preview=false', 'pdf_path': None, 'page_images': []}",
+                "if payload.get('render_preview', True):",
+                "    preview_root = output.with_name(f'.{output.stem}.preview')",
+                "    preview_root.mkdir(parents=True, exist_ok=True)",
+                "    page_path = preview_root / 'page-1.png'",
+                "    page_path.write_bytes(b'fake-png')",
+                "    preview = {'status': 'completed', 'renderer': 'dovie-artifact-runtime', 'pdf_path': None, 'page_images': [str(page_path)]}",
                 "print(json.dumps({",
                 "  'status': 'completed',",
                 "  'kind': 'dovie.editable_presentation',",
@@ -91,6 +98,7 @@ def _write_fake_renderer(path: Path) -> None:
                 "  'output_path': str(output),",
                 "  'slidespec_path': str(spec_path),",
                 "  'diagnostics': [],",
+                "  'preview': preview,",
                 "}))",
             ]
         ),
@@ -403,16 +411,16 @@ def test_build_editable_presentation_invokes_controlled_renderer(
     assert result["quality"] == {
         "status": "passed",
         "structural_status": "passed",
-            "visual_status": "skipped",
-            "issue_count": 0,
-            "requirements": (
-                "Repair every structural issue, load every rendered page with "
-                "vision_analyze at readable size, and rebuild until clean. A "
-                "vision-capable current authoring model must inspect the raw pixels "
-                "itself; auxiliary vision analysis is the fallback only for a "
-                "non-vision current model."
-            ),
-        }
+        "visual_status": "skipped",
+        "issue_count": 0,
+        "requirements": (
+            "Repair every structural issue, attach every rendered page image "
+            "as a native multimodal input at readable size, and rebuild until "
+            "clean. A vision-capable current authoring model must inspect the "
+            "raw pixels itself; auxiliary vision analysis is the fallback only "
+            "for a non-vision current model."
+        ),
+    }
     assert result["artifacts"] == [
         {
             "path": str(output),
@@ -421,6 +429,32 @@ def test_build_editable_presentation_invokes_controlled_renderer(
             "operation": "created",
         }
     ]
+
+
+def test_build_editable_presentation_uses_artifact_runtime_preview(
+    monkeypatch,
+    tmp_path,
+):
+    renderer = tmp_path / "fake_renderer.py"
+    _write_fake_renderer(renderer)
+    monkeypatch.setenv("DOVIE_NODE_BINARY", sys.executable)
+    monkeypatch.setenv("DOVIE_DECK_RENDERER_PATH", str(renderer))
+
+    result = build_editable_presentation(
+        {
+            "title": "Artifact preview",
+            "slidespec": _sample_spec(),
+            "output_path": "artifact-preview.pptx",
+        },
+        workspace_root=str(tmp_path),
+        interrupted=lambda: False,
+    )
+
+    assert result["preview"]["status"] == "completed"
+    assert result["preview"]["renderer"] == "dovie-artifact-runtime"
+    assert result["preview"]["pdf_path"] is None
+    assert Path(result["preview"]["page_images"][0]).read_bytes() == b"fake-png"
+    assert result["quality"]["visual_status"] == "awaiting_agent_review"
 
 
 def test_build_editable_presentation_returns_unique_path_by_default(
